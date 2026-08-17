@@ -1,0 +1,63 @@
+{
+  "meta": {
+    "descripcion": "Base de pruebas del control de acceso BAKELITE. Mezcla de RUT habilitados y no habilitados para probar relé (verde) y rechazo (rojo).",
+    "centro": "CE05",
+    "reloj": "T010",
+    "codigos": {
+      "0": "NO habilitado -> rojo, sin relé",
+      "1": "HABILITADO -> verde + pulso de relé",
+      "3": "lectura inválida / RUT no reconocido -> rojo",
+      "4": "sin conexión a red -> amarillo"
+    }
+  },
+  "personas": [
+    {
+      "rut": "4266307-7",
+      "nombre": "Laura Sofía Gómez",
+      "empresa": "Sopytec",
+      "habilitado": true,
+      "motivo": "",
+      "foto": null
+    },
+    {
+      "rut": "12329308-8",
+      "nombre": "Carlos Andrés Rojas",
+      "empresa": "Sopytec",
+      "habilitado": true,
+      "motivo": "",
+      "foto": null
+    },
+    {
+      "rut": "9884029-K",
+      "nombre": "María José Fuentes",
+      "empresa": "Contratista externo",
+      "habilitado": false,
+      "motivo": "Credencial vencida",
+      "foto": null
+    },
+    {
+      "rut": "17346232-8",
+      "nombre": "Diego Martínez Soto",
+      "empresa": "Sopytec",
+      "habilitado": true,
+      "motivo": "",
+      "foto": null
+    },
+    {
+      "rut": "20820085-2",
+      "nombre": "Valentina Pérez Muñoz",
+      "empresa": "Visita",
+      "habilitado": false,
+      "motivo": "Acceso revocado",
+      "foto": null
+    },
+    {
+      "rut": "18419773-1",
+      "nombre": "Sebastián Torres Vega",
+      "empresa": "Sopytec",
+      "habilitado": true,
+      "motivo": "",
+      "foto": null
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+pyserial>=3.5
+# Opcional: suaviza el círculo de AUTORIZADO/DENEGADO (antialiasing).
+# Si no se instala, la app usa un respaldo con glifo y funciona igual.
+Pillow>=9.0
