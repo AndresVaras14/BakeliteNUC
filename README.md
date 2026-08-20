@@ -23,14 +23,28 @@ serie, extrae el RUT, valida el acceso y responde al relé y al semáforo.
   registro” con nombre, cédula, hora, sentido (ENTRADA/SALIDA) y veredicto.
 - **Lista de los últimos 5 registros** debajo de la tarjeta.
 - **Solo lee cédula de identidad**: indicado en el encabezado.
+- **Luz grande en vivo + leyenda**: una luz grande en la pantalla principal
+  refleja lo que pasa (azul=leyendo, verde=autorizado, rojo=denegado,
+  amarillo=sin conexión), con una leyenda que explica cada color.
+- **Anti-doble-lectura**: tras leer un carnet, ignora nuevas lecturas de esa
+  lectora durante 2 s (`LECTURA_COOLDOWN_SEGUNDOS`), para no mandar dos consultas.
+- **RUT enmascarado** en pantalla (`4.266.307-7`); en la BD/JSON se guarda sin formato.
+- **Estado en línea** en el pie: luz **verde** (en línea) / **roja** (sin conexión)
+  y la **hora de la última conexión** al servidor.
+- **Registro de todo en JSON** (`registros.json`) con dos banderas por evento:
+  `subido_local` y `subido_api` (0/1); se sube a la **BD local** (SQLite) y a la
+  **API**, y lo que quede en 0 se reintenta. Ver *Registros y sincronización*.
+- **Ubicación del torniquete** configurable (en ⚙ Ajustes), se muestra en el pie.
 - **Pantalla de estado de conexión** (botón 🔌 Estado): muestra si falta
   conectar alguna lectora o el Arduino, con botón **Volver a detectar**. Se abre
   sola al arrancar si falta hardware, y aparece un aviso en la pantalla principal.
 - **Botón ⚙ Ajustes** (o tecla `F2`) para **invertir lectoras** y/o **relés**
   cuando quedan al revés, con botones para **probar cada torniquete** y
-  **probar las luces**. Los ajustes se guardan en `ajustes.json` y persisten.
-- **Círculo de veredicto suavizado** (antialiasing con Pillow; si no está,
-  usa un respaldo que funciona igual).
+  **probar las luces**, y para fijar la **ubicación**. Se guarda en `ajustes.json`.
+- **A prueba de errores**: `supervisor.py` relanza la app si se cae; los errores
+  quedan en `logs/errores.log` y un error crítico se avisa en pantalla.
+- **Redondeado** (tarjeta, tablas, botones, píldoras de ENTRADA/SALIDA) y
+  **círculo de veredicto suavizado** (antialiasing con Pillow).
 
 ## Estructura
 
@@ -43,9 +57,13 @@ serie, extrae el RUT, valida el acceso y responde al relé y al semáforo.
 | `lectora.py` | Hilo de lectura de cada lectora. §8 |
 | `rut.py` | Extracción/normalización del RUT (`fnEnmascaraRut`). §8.2 |
 | `validador.py` | Valida contra `personas.json` y devuelve el código 0–4. §7 |
-| `controlador.py` | Une lectora → validación → luz + relé + pantalla. |
-| `interfaz.py` | Interfaz gráfica (Tkinter) + historial + diálogo de ajustes. |
-| `ajustes.py` | Inversión de lectoras/relés, persistida en `ajustes.json`. |
+| `controlador.py` | Une lectora → validación → luz + relé + pantalla + registro. |
+| `interfaz.py` | Interfaz gráfica (Tkinter): luz grande, historial, diálogos. |
+| `widgets.py` | Widgets redondeados (píldoras, botones, paneles) con Pillow. |
+| `ajustes.py` | Inversión de lectoras/relés + ubicación, en `ajustes.json`. |
+| `registros.py` | Registro en JSON (con banderas) + BD local SQLite. |
+| `sincronizador.py` | Sube pendientes a BD local + API, reintenta, estado en línea. |
+| `supervisor.py` | Lanza la app y la relanza si se cae (auto-reinicio). |
 | `personas.json` | Base de datos de pruebas (editable). |
 
 ## Requisitos
@@ -66,15 +84,37 @@ serie, extrae el RUT, valida el acceso y responde al relé y al semáforo.
 
 ## Ejecutar
 
+Normal:
+
 ```bash
 python3 main.py
 ```
 
+Recomendado en el equipo real (se relanza solo si se cae):
+
+```bash
+python3 supervisor.py
+```
+
 - Si detecta hardware, usa las lectoras y el Arduino reales.
-- Si **no** hay hardware, arranca en **modo simulación** (pie de pantalla:
-  “Modo simulación”) y puedes probar todo el flujo con el teclado.
+- Si **no** hay hardware, arranca en **modo simulación** y puedes probar todo el
+  flujo con el teclado.
 
 Salir de pantalla completa: `Esc`. Alternar: `F11`.
+
+### En Visual Studio Code
+
+Ya viene un `.vscode/launch.json`. Para que **lance bien**:
+
+1. Abre la carpeta del proyecto como *workspace* (File → Open Folder →
+   `BakeliteNUC`), no una carpeta superior.
+2. Elige el intérprete correcto: `Ctrl+Shift+P` → **Python: Select Interpreter**
+   → el Python del sistema (que tenga `tkinter`). Si falla con
+   `ModuleNotFoundError: tkinter`, instala `sudo apt install python3-tk`.
+3. Ejecuta con **F5** → *BAKELITE — App* (o *Supervisor*).
+
+> Las rutas del proyecto son absolutas, así que funciona sin importar el
+> directorio de trabajo.
 
 ## Modo simulación (teclado)
 
@@ -124,6 +164,58 @@ Abre el diálogo con el botón **⚙ Ajustes** (abajo a la derecha) o con `F2`:
 
 El diálogo muestra en vivo el mapeo resultante (Lectora 1 → ENTRADA → `R2*`,
 etc.). Todo se guarda en `ajustes.json` y se aplica al instante.
+
+## Registros y sincronización
+
+Cada acceso (autorizado o denegado) se guarda en **`registros.json`** con dos
+banderas:
+
+```json
+{ "id": 1, "id_evento": "b5fcccc5…", "rut": "042663077",
+  "nombre": "Laura Sofía Gómez", "sentido": "E", "codigo": 1, "autorizado": true,
+  "ubicacion": "Torniquete Norte", "subido_local": 0, "subido_api": 0,
+  "payload": { "idEvento": "b5fcccc5…", "idTerminal": 1, "resultado": "AUTORIZADO",
+               "rut": "4.266.307-7", "evento": "ENTRADA",
+               "fechaHora": "2026-08-19T14:35:20-04:00", "nombre": "Laura Sofía Gómez" } }
+```
+
+Además, cada marca lleva un **`idEvento` (UUID)** único y su **payload completo**
+guardado en el JSON *antes* de enviarse (cola local, según el contrato).
+
+El **sincronizador** (hilo en segundo plano) toma los que están en 0 y los sube:
+
+- **BD local** → SQLite real (`registros_local.db`). Al insertarlo, `subido_local = 1`.
+- **API de Bakelite** → `POST https://bakeliteapi.sopytec.cl/api/terminal/events`
+  con el payload del contrato ([CONTRATO_INTEGRACION_TORNIQUETE.md](CONTRATO_INTEGRACION_TORNIQUETE.md)).
+  Se envía el mismo `idEvento` en cada reintento (idempotencia).
+
+Manejo de respuestas (contrato):
+
+| Respuesta | Acción |
+|---|---|
+| HTTP 201 `REGISTRADO` / HTTP 200 `DUPLICADO` | Entregado → `subido_api = 1` |
+| HTTP 400 (datos inválidos) | No se reintenta → `subido_api = -1` (se guarda el detalle) |
+| Timeout / red / 429 / 5xx | Queda pendiente y **se reintenta** con espera incremental (tope 60 s) |
+
+Así, si la API o la red están caídas, nada se pierde: la marca queda en el JSON
+con su `idEvento` y se reenvía después. En `config.py`: `API_URL`, `ID_TERMINAL`,
+y `SINCRONIZAR_*`. La BD local sigue con `SIMULAR_BD_LOCAL=True` (SQLite real);
+para volver a simular la API sin enviar de verdad, `SIMULAR_API=True`.
+
+## Robustez y errores
+
+- `supervisor.py` relanza la app si termina con error (con espera y freno de
+  *crash-loop*).
+- Todo se registra en `logs/app.log`; los errores, además, en `logs/errores.log`.
+- Un error en un callback de la interfaz **no tumba la app**: se registra y se
+  muestra una franja roja de *ERROR CRÍTICO* en pantalla.
+
+## Ubicación del torniquete
+
+En **⚙ Ajustes** → *Ubicación del torniquete* escribe el lugar (ej.
+"Torniquete Norte · Piso 1") y **Guardar**. Se muestra en el pie y se incluye en
+cada registro (para la BD). Mientras no se configure, el pie dice
+“Ubicación sin configurar”.
 
 ## Editar la base de pruebas
 

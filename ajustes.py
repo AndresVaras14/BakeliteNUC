@@ -19,14 +19,14 @@ import logging
 import config
 
 log = logging.getLogger("ajustes")
-RUTA = "ajustes.json"
 
 
 class Ajustes:
-    def __init__(self, ruta=RUTA):
-        self.ruta = ruta
+    def __init__(self, ruta=None):
+        self.ruta = ruta or config.ARCHIVO_AJUSTES
         self.invertir_lectoras = False
         self.invertir_reles = False
+        self.ubicacion = config.UBICACION_DEFECTO
         self.cargar()
 
     def cargar(self):
@@ -35,8 +35,9 @@ class Ajustes:
                 d = json.load(f)
             self.invertir_lectoras = bool(d.get("invertir_lectoras", False))
             self.invertir_reles = bool(d.get("invertir_reles", False))
-            log.info("Ajustes cargados: lectoras=%s reles=%s",
-                     self.invertir_lectoras, self.invertir_reles)
+            self.ubicacion = str(d.get("ubicacion", config.UBICACION_DEFECTO))
+            log.info("Ajustes cargados: lectoras=%s reles=%s ubicacion=%r",
+                     self.invertir_lectoras, self.invertir_reles, self.ubicacion)
         except FileNotFoundError:
             log.info("Sin ajustes.json previo; usando valores por defecto.")
         except Exception as e:  # noqa: BLE001
@@ -48,9 +49,10 @@ class Ajustes:
                 json.dump({
                     "invertir_lectoras": self.invertir_lectoras,
                     "invertir_reles": self.invertir_reles,
+                    "ubicacion": self.ubicacion,
                 }, f, indent=2, ensure_ascii=False)
-            log.info("Ajustes guardados: lectoras=%s reles=%s",
-                     self.invertir_lectoras, self.invertir_reles)
+            log.info("Ajustes guardados: lectoras=%s reles=%s ubicacion=%r",
+                     self.invertir_lectoras, self.invertir_reles, self.ubicacion)
         except Exception as e:  # noqa: BLE001
             log.error("No se pudo guardar %s: %s", self.ruta, e)
 

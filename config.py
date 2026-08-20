@@ -5,13 +5,25 @@ Basada en el bloque §14 de ESPECIFICACION_HARDWARE.md.
 Cambiar aquí y nada más para reconfigurar el equipo.
 """
 
+import os
+
+# Carpeta del proyecto: todas las rutas se resuelven aquí, así la app funciona
+# sin importar desde dónde se lance (terminal, VS Code, supervisor...).
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def ruta(nombre):
+    return os.path.join(BASE_DIR, nombre)
+
+
 # ===== IDENTIDAD DEL EQUIPO =====
 CENTRO = "CE05"
 RELOJ = "T010"
 MARCA = "BAKELITE"
 APP_TITULO = "CONTROL DE ACCESO"
 SUBTITULO = "Solo lee cédula de identidad"
-TERMINAL_NOMBRE = "Terminal Principal · Edificio A"
+# Ubicación por defecto si el operador aún no la configuró (se pide en Ajustes).
+UBICACION_DEFECTO = ""
 
 # ===== CAPACIDADES DEL HARDWARE =====
 POSEE_RELE = 1        # 1 = hay Arduino con relés
@@ -55,11 +67,97 @@ SCAN_PUERTOS_INTERVALO_SEGUNDOS = 10
 SEGUNDOS_MOSTRAR_RESULTADO = 5     # cuánto se mantiene el resultado antes de volver a "esperando"
 APAGAR_LUZ_AMARILLA_DESPUES = 3    # LOFF* diferido tras amarillo (código 4)
 
+# Anti-doble-lectura: tras procesar una lectura, se ignoran nuevas lecturas de
+# esa misma lectora durante este tiempo (evita mandar 2 consultas al servidor).
+LECTURA_COOLDOWN_SEGUNDOS = 2.0
+
+# Anti-repetición: si la MISMA cédula se vuelve a leer en la misma lectora
+# dentro de esta ventana, se ignora. La ventana se reinicia con cada lectura
+# ignorada, así una cédula que queda apoyada sobre el lector no vuelve a
+# disparar consultas por mucho rato que se quede ahí. Una cédula distinta sí
+# pasa apenas termina el cooldown corto de arriba.
+LECTURA_MISMO_RUT_SEGUNDOS = 10.0
+
+# El relé debe accionarse ANTES de encender la luz verde: la persona ve el
+# verde cuando el torniquete ya está liberado. Esta pausa garantiza que el
+# Arduino reciba los dos comandos en ese orden y no los procese juntos.
+RETARDO_RELE_LUZ_SEGUNDOS = 0.15
+
 # ===== VALIDACIÓN (modo prueba con JSON) =====
-ARCHIVO_PERSONAS = "personas.json"
+ARCHIVO_PERSONAS = ruta("personas.json")
 # Simula la latencia de la BD/WebService. La luz AZUL se mantiene (relé + pantalla)
 # durante toda la consulta, hasta que llega la respuesta.
 VALIDACION_DELAY_SIMULADO = 0.7
+
+# ===== LOGOS =====
+# Carpeta con los logos de marca. El de Bakelite viene en azul oscuro (pensado
+# para fondos blancos), así que la interfaz lo recolorea para el fondo oscuro.
+DIR_LOGOS = ruta("Logos")
+LOGO_BAKELITE = os.path.join(DIR_LOGOS, "logo_c5f64981b64c77713caba6eefa309e69_2x.webp")
+LOGO_SOPYTEC = os.path.join(DIR_LOGOS, "logo-sopytec.png")
+LOGO_BAKELITE_ALTO = 46      # píxeles de alto en la barra superior
+LOGO_SOPYTEC_ALTO = 26       # píxeles de alto en el pie
+
+# ===== ARCHIVOS DE ESTADO / REGISTROS =====
+ARCHIVO_AJUSTES = ruta("ajustes.json")
+ARCHIVO_REGISTROS = ruta("registros.json")      # JSON con todo lo que se hace (con flags)
+DIR_LOGS = ruta("logs")
+ARCHIVO_LOG = os.path.join(DIR_LOGS, "app.log")
+ARCHIVO_LOG_ERRORES = os.path.join(DIR_LOGS, "errores.log")
+
+# ===== SINCRONIZACIÓN (BD local + API) =====
+# Cada marca (acceso autorizado/rechazado) se guarda en el JSON (cola local) con
+# subido_local=0 y subido_api=0, y el sincronizador la sube a la BD local
+# (SQL Server) y a la API de Bakelite (contrato). Lo que quede en 0 se reintenta con espera
+# incremental. Ver CONTRATO_INTEGRACION_TORNIQUETE.md.
+SINCRONIZAR_INTERVALO_SEGUNDOS = 10
+SINCRONIZAR_ESPERA_MAX_SEGUNDOS = 60   # tope de la espera incremental ante fallos de red
+
+# Cada cuánto se comprueba que las APIs siguen respondiendo, aunque no haya
+# nada que subir. Es independiente de la espera incremental de arriba: aunque
+# los reintentos se separen hasta 60 s, el estado se sigue revisando a este
+# ritmo, así el indicador de la pantalla no se queda pegado.
+PING_INTERVALO_SEGUNDOS = 20
+
+USAR_BD_LOCAL = True        # True = escribe en SQL Server (BakeliteTorniquete)
+SIMULAR_API = False         # False = envía de verdad a la API (contrato)
+
+# ===== BD LOCAL: SQL SERVER (BakeliteTorniquete) =====
+# El esquema lo crea bd/01_crear_BakeliteTorniquete.sql y el dueño de la base
+# lo deja bd/00_crear_usuario.sql. Requiere pyodbc + driver ODBC de Microsoft.
+SQL_SERVIDOR = os.environ.get("BAKELITE_SQL_SERVIDOR", "localhost")
+SQL_BASE = os.environ.get("BAKELITE_SQL_BASE", "BakeliteTorniquete")
+SQL_USUARIO = os.environ.get("BAKELITE_SQL_USUARIO", "userBakelite")
+SQL_CLAVE = os.environ.get("BAKELITE_SQL_CLAVE", "bakelite123")
+SQL_PUERTO = int(os.environ.get("BAKELITE_SQL_PUERTO", "1433"))
+# Driver ODBC instalado. Los dos que sirven:
+#   "ODBC Driver 18 for SQL Server"  -> driver oficial de Microsoft
+#   "FreeTDS"                        -> paquete tdsodbc de Ubuntu
+# Con AUTO se usa el de Microsoft si está, y si no FreeTDS (ver basedatos.py).
+SQL_DRIVER = os.environ.get("BAKELITE_SQL_DRIVER", "AUTO")
+SQL_TRUSTED = False          # True = autenticación de Windows (ignora usuario/clave)
+SQL_ENCRYPT = True           # el Driver 18 cifra por defecto
+SQL_TRUST_CERT = True        # instancia local con certificado autofirmado
+SQL_TIMEOUT_CONEXION = 5     # segundos para abrir la conexión
+SQL_TIMEOUT_CONSULTA = 15    # segundos por consulta
+
+# API oficial de Bakelite (contrato de integración).
+API_BASE = "https://bakeliteapi.sopytec.cl/"
+API_URL = "https://bakeliteapi.sopytec.cl/api/terminal/events"
+API_TIMEOUT_SEGUNDOS = 10
+# Aviso de cortes de conexión: "hubo un corte desde las XX, recuperado a las XX".
+# Mientras esté vacío, los cortes se guardan en dbo.IncidentesConexion con
+# EstadoEnvio = 'PENDIENTE' y se informan solos en cuanto se defina la URL.
+# Estado de la API en tiempo real (health check). Contrato en
+# CONTRATO_ENDPOINTS_PENDIENTES.md: 200 con baseDatos "OK" = hay conexión.
+API_URL_PING = "https://bakeliteapi.sopytec.cl/api/terminal/health"
+API_URL_INCIDENTES = "https://bakeliteapi.sopytec.cl/api/terminal/incidents"
+
+# Datos del terminal en Bakelite. Solo se consulta para verificar que el
+# idTerminal existe y está activo: el NOMBRE lo manda la BD local y no se
+# envía nada del terminal a la API, únicamente su id.
+API_URL_TERMINAL = "https://bakeliteapi.sopytec.cl/api/terminal"
+ID_TERMINAL = 1             # idTerminal asignado a este torniquete (contrato)
 
 # ===== VID:PID relevantes =====
 CH340_VIDPID = "1a86:7523"   # CH340 (lectoras Aigather y clones)

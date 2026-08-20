@@ -2,3 +2,7 @@ pyserial>=3.5
 # Opcional: suaviza el círculo de AUTORIZADO/DENEGADO (antialiasing).
 # Si no se instala, la app usa un respaldo con glifo y funciona igual.
 Pillow>=9.0
+
+# BD local del torniquete: SQL Server (BakeliteTorniquete).
+# Requiere ademas el driver ODBC de Microsoft instalado en el sistema operativo.
+pyodbc>=5.0

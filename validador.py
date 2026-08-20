@@ -49,7 +49,13 @@ class Validador:
     def __init__(self, ruta_json=None):
         self.ruta = ruta_json or config.ARCHIVO_PERSONAS
         self.por_rut = {}
+        self.error_carga = None
         self.cargar()
+
+    def disponible(self):
+        """¿Se puede consultar la fuente de datos? Hoy es el JSON local; cuando
+        se conecte la API externa, esto pasa a ser un ping real al servicio."""
+        return not self.error_carga and bool(self.por_rut)
 
     def cargar(self):
         try:
@@ -57,7 +63,10 @@ class Validador:
                 data = json.load(f)
         except Exception as e:  # noqa: BLE001
             log.error("No se pudo cargar %s: %s", self.ruta, e)
+            self.error_carga = str(e)
             data = {}
+        else:
+            self.error_carga = None
         self.por_rut = {}
         for p in data.get("personas", []):
             clave = normaliza_rut(p.get("rut", ""))
@@ -96,7 +105,7 @@ class Validador:
         codigo = 1 if habilitado else 0
         return Resultado(
             codigo, MENSAJES[codigo], habilitado, sentido, rut_norm,
-            rut_display=persona.get("rut", formatea_rut(rut_norm)),
+            rut_display=formatea_rut(rut_norm),   # enmascarado con . y - (solo front)
             nombre=persona.get("nombre", ""),
             foto=persona.get("foto"),
             motivo="" if habilitado else persona.get("motivo", "Acceso no habilitado"),
