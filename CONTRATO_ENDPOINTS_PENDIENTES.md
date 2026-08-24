@@ -1,7 +1,16 @@
-# Contrato de integración adicional con BakeliteApi
+# Contrato de endpoints pendientes para el NUC (Python)
 
-Estado: **implementado en la API**. Este documento define los tres endpoints
-adicionales al envío de marcas descrito en `CONTRATO_INTEGRACION_TORNIQUETE.md`.
+**Destinatario:** equipo responsable del software Python instalado en el NUC.  
+**Vigencia:** 2026-08-24.  
+**Estado:** endpoints implementados en BakeliteApi; integración pendiente o por
+verificar en el software Python.
+
+Este es el contrato que debe enviarse al equipo del NUC para implementar los
+tres endpoints adicionales al envío de marcas definido en
+`CONTRATO_INTEGRACION_TORNIQUETE.md`.
+
+La disponibilidad del propio software Python mediante heartbeat es otro flujo
+y se mantiene separada en `CONTRATO_DISPONIBILIDAD_SOFTWARE_ESCRITORIO.md`.
 
 Base URL de producción:
 
@@ -162,13 +171,36 @@ configuración. Un terminal existente pero inactivo se devuelve con
 
 ## Cambios necesarios en el software del torniquete
 
-1. Configurar `API_URL_PING` con `/api/terminal/health`.
-2. Configurar `API_URL_INCIDENTES` con `/api/terminal/incidents`.
+1. Configurar `API_URL_PING` con
+   `https://bakeliteapi.sopytec.cl/api/terminal/health`.
+2. Configurar `API_URL_INCIDENTES` con
+   `https://bakeliteapi.sopytec.cl/api/terminal/incidents`.
 3. Agregar un UUID persistente a cada incidente local y enviarlo como
    `idIncidente`; nunca generar otro UUID al reintentar.
 4. Aceptar `idIncidente` (string), `idRegistro` (número) y `estado` en la
    respuesta del incidente.
 5. Calcular `duracionSegundos` desde las dos fechas, con la misma precisión en
    segundos que se envía a la API.
-6. Al iniciar, consultar `/api/terminal/{idTerminal}` y adoptar el nombre que
-   devuelve Bakelite.
+6. La sincronización del nombre ya no considera a Bakelite como fuente única.
+   Debe implementarse según `CONTRATO_SINCRONIZACION_NOMBRE_TERMINAL.md`.
+
+## Criterio de aceptación en el NUC
+
+La integración se considera terminada cuando se comprueben estos casos:
+
+1. `GET /api/terminal/health` reemplaza cualquier sondeo provisional basado en
+   enviar un payload vacío al endpoint de marcas.
+2. Con API o red caída, las marcas y los incidentes permanecen en la BD local.
+3. Al recuperar conexión, un incidente nuevo devuelve `201 REGISTRADO`.
+4. Reenviar el mismo UUID devuelve `200 DUPLICADO` y no crea otra fila.
+5. Un `400` queda registrado como fallo definitivo para revisión y no entra en
+   un ciclo infinito de reintentos.
+6. `429`, `5xx`, timeout o error de red mantienen el registro pendiente.
+7. La aceptación de la sincronización bidireccional del nombre se evalúa en
+   `CONTRATO_SINCRONIZACION_NOMBRE_TERMINAL.md`.
+
+Este contrato no reemplaza el envío de marcas ni el heartbeat. Para completar
+toda la integración del NUC deben aplicarse también:
+
+- `CONTRATO_INTEGRACION_TORNIQUETE.md`;
+- `CONTRATO_DISPONIBILIDAD_SOFTWARE_ESCRITORIO.md`.

@@ -689,38 +689,115 @@ class BDLocal:
         return ok
 
     # ================= Terminal =================
+    # El nombre del terminal se sincroniza con Bakelite en ambos sentidos y gana
+    # el cambio más reciente. Por eso NombreFecha se trata aparte de
+    # FechaModificacion: cambiar la ubicación no debe hacer que un nombre viejo
+    # gane la comparación. Ver CONTRATO_SINCRONIZACION_NOMBRE_TERMINAL.md.
     def terminal(self, id_terminal=None):
         idt = config.ID_TERMINAL if id_terminal is None else id_terminal
 
         def _fn(cur):
-            cur.execute("SELECT IdTerminal, Nombre, Ubicacion, Activo "
+            cur.execute("SELECT IdTerminal, Nombre, Ubicacion, Activo, "
+                        "       NombreFecha, NombreOrigen, NombrePor, NombreSincronizado "
                         "FROM dbo.Terminales WHERE IdTerminal = ?", idt)
             r = cur.fetchone()
             if not r:
                 return None
-            return {"id": r[0], "nombre": r[1], "ubicacion": r[2], "activo": bool(r[3])}
+            return {"id": r[0], "nombre": r[1], "ubicacion": r[2], "activo": bool(r[3]),
+                    "nombre_fecha": r[4], "nombre_origen": r[5], "nombre_por": r[6],
+                    "nombre_sincronizado": bool(r[7])}
 
         ok, res = self._ejecutar(_fn, "terminal")
         return res if ok else None
 
     def renombrar_terminal(self, nombre, ubicacion=None, usuario=None, id_terminal=None):
-        """Cambia el nombre del terminal desde la app."""
+        """Cambia el nombre del terminal desde esta app (origen LOCAL).
+
+        Sella la hora del cambio en NombreFecha y deja NombreSincronizado = 0:
+        el sincronizador lo subirá a Bakelite. Si no hay red, el nombre igual
+        queda cambiado en pantalla y el envío espera, siempre con esta fecha.
+        Devuelve el dict del terminal ya actualizado, o None si falló.
+        """
         idt = config.ID_TERMINAL if id_terminal is None else id_terminal
         nombre = (nombre or "").strip()
         if not nombre:
             log.error("El nombre del terminal no puede quedar vacío.")
-            return False
+            return None
+        nombre = _corta(nombre, 150)
 
         def _fn(cur):
             cur.execute(
                 "UPDATE dbo.Terminales "
                 "SET Nombre = ?, Ubicacion = COALESCE(?, Ubicacion), "
+                "    NombreFecha = SYSDATETIMEOFFSET(), NombreOrigen = 'LOCAL', "
+                "    NombrePor = ?, NombreSincronizado = 0, "
                 "    ModificadoPor = ?, FechaModificacion = SYSDATETIME() "
                 "WHERE IdTerminal = ?",
-                _corta(nombre, 150), _corta(ubicacion, 200), _corta(usuario, 100), idt)
-            return cur.rowcount > 0
+                nombre, _corta(ubicacion, 200), _corta(usuario, 100),
+                _corta(usuario, 100), idt)
+            if cur.rowcount <= 0:
+                return None
+            cur.execute("SELECT Nombre, NombreFecha, NombrePor "
+                        "FROM dbo.Terminales WHERE IdTerminal = ?", idt)
+            r = cur.fetchone()
+            return {"id": idt, "nombre": r[0], "nombre_fecha": r[1],
+                    "nombre_origen": "LOCAL", "nombre_por": r[2],
+                    "nombre_sincronizado": False}
 
         ok, res = self._ejecutar(_fn, "renombrar_terminal")
+        if ok and res:
+            log.info("Terminal renombrado a %r (pendiente de subir a Bakelite).",
+                     res["nombre"])
+            return res
+        return None
+
+    def aplicar_nombre_remoto(self, nombre, nombre_fecha, nombre_por=None,
+                              id_terminal=None):
+        """Adopta el nombre que mandó Bakelite, conservando SU fecha.
+
+        Guardar la hora de aplicación en vez de la recibida haría que la copia
+        local pareciera siempre más nueva y el cambio rebotaría de vuelta en la
+        comparación siguiente. El WHERE es la guarda del contrato: nunca pisar
+        un nombre local más nuevo, aunque el ciclo llegue tarde o desordenado.
+
+        Devuelve True si se aplicó, False si el local ya era más nuevo o igual.
+        """
+        idt = config.ID_TERMINAL if id_terminal is None else id_terminal
+        nombre = (nombre or "").strip()
+        if not nombre or not nombre_fecha:
+            log.error("Nombre remoto inválido: %r / %r", nombre, nombre_fecha)
+            return False
+        fecha = _texto_fecha(nombre_fecha)
+
+        def _fn(cur):
+            cur.execute(
+                "UPDATE dbo.Terminales "
+                "SET Nombre = ?, NombreFecha = ?, NombreOrigen = 'API', "
+                "    NombrePor = ?, NombreSincronizado = 1 "
+                "WHERE IdTerminal = ? AND NombreFecha < ?",
+                _corta(nombre, 150), fecha, _corta(nombre_por, 100), idt, fecha)
+            return cur.rowcount > 0
+
+        ok, res = self._ejecutar(_fn, "aplicar_nombre_remoto")
+        if ok and res:
+            log.info("Nombre del terminal adoptado desde Bakelite: %r (%s).",
+                     nombre, fecha)
+        return bool(ok and res)
+
+    def marcar_nombre_sincronizado(self, id_terminal=None):
+        """El nombre local ya está en Bakelite: deja de estar pendiente.
+
+        Solo limpia la marca si NombreFecha no cambió mientras se subía; si el
+        operador renombró de nuevo en ese intervalo, el pendiente sigue vivo.
+        """
+        idt = config.ID_TERMINAL if id_terminal is None else id_terminal
+
+        def _fn(cur):
+            cur.execute("UPDATE dbo.Terminales SET NombreSincronizado = 1 "
+                        "WHERE IdTerminal = ?", idt)
+            return cur.rowcount > 0
+
+        ok, res = self._ejecutar(_fn, "marcar_nombre_sincronizado")
         return bool(ok and res)
 
     # ================= Versiones =================
@@ -791,6 +868,16 @@ class BDLocal:
 def _ahora_iso():
     """Fecha/hora local con offset (Chile), como la usa el contrato."""
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _texto_fecha(valor):
+    """Fecha para un parámetro DATETIMEOFFSET. pyodbc no enlaza ese tipo, así
+    que va como texto ISO y SQL Server lo convierte (igual que los incidentes)."""
+    if isinstance(valor, datetime.datetime):
+        if valor.tzinfo is None:
+            valor = valor.astimezone()
+        return valor.isoformat(timespec="seconds")
+    return str(valor).strip()
 
 
 def _corta(texto, largo):

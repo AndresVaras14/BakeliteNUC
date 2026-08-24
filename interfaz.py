@@ -99,6 +99,7 @@ class Interfaz:
         self.historial = []
         self._dlg = None
         self._dlg_estado = None
+        self._entrada_nombre = None
 
         self.root = tk.Tk()
         self.root.title(f"{config.MARCA} — {config.APP_TITULO}")
@@ -328,9 +329,12 @@ class Interfaz:
 
         izq = tk.Frame(foot, bg=BG)
         izq.grid(row=0, column=0, sticky="w")
+        self.lbl_terminal = tk.Label(izq, text="", font=F(10), fg=DIM2, bg=BG)
+        self.lbl_terminal.pack(side="left", padx=(0, 18))
         self.lbl_ubicacion = tk.Label(izq, text="", font=F(10), fg=DIM2, bg=BG)
         self.lbl_ubicacion.pack(side="left")
         self._refrescar_ubicacion()
+        self._refrescar_nombre_terminal()
 
         der = tk.Frame(foot, bg=BG)
         der.grid(row=0, column=1, sticky="e")
@@ -383,6 +387,11 @@ class Interfaz:
 
     def mostrar_critico(self, texto):
         self.cola.put(lambda: self._mostrar_critico(texto))
+
+    def set_nombre_terminal(self, nombre):
+        """El nombre cambió en Bakelite y el sincronizador lo adoptó. Llega
+        desde el hilo del sincronizador, así que pasa por la cola."""
+        self.cola.put(lambda: self._ui_nombre_terminal(nombre))
 
     # ================= aplicación en el hilo de Tk =================
     def _drenar_cola(self):
@@ -706,6 +715,28 @@ class Interfaz:
         threading.Thread(target=worker, daemon=True).start()
 
     # ================= diálogo de ajustes =================
+    def _refrescar_nombre_terminal(self):
+        nombre = None
+        if self.controlador is not None:
+            try:
+                nombre = self.controlador.nombre_terminal()
+            except Exception as e:  # noqa: BLE001
+                log.error("No se pudo leer el nombre del terminal: %s", e)
+        self._ui_nombre_terminal(nombre)
+
+    def _ui_nombre_terminal(self, nombre):
+        nombre = (nombre or "").strip()
+        if nombre:
+            self.lbl_terminal.config(text=f"🖥  {nombre}", fg=DIM)
+        else:
+            self.lbl_terminal.config(text="🖥  Terminal sin nombre  (⚙ Ajustes)", fg=DIM2)
+        if self._dlg is not None and tk.Toplevel.winfo_exists(self._dlg) \
+                and getattr(self, "_entrada_nombre", None) is not None:
+            # El diálogo está abierto: refleja ahí también el nombre que ganó.
+            if self._entrada_nombre.get().strip() != nombre:
+                self._entrada_nombre.delete(0, "end")
+                self._entrada_nombre.insert(0, nombre)
+
     def _refrescar_ubicacion(self):
         aj = getattr(self.controlador, "ajustes", None) if self.controlador else None
         ubic = (aj.ubicacion if aj else "") or ""
@@ -725,11 +756,46 @@ class Interfaz:
         self._dlg = dlg
         dlg.title("Ajustes")
         dlg.configure(bg=BG)
-        dlg.geometry("640x640")
+        dlg.geometry("640x760")
         dlg.transient(self.root)
         dlg.resizable(False, False)
 
         tk.Label(dlg, text="AJUSTES", font=F(15, True), fg=TXT, bg=BG).pack(pady=(20, 2))
+
+        # --- Nombre del terminal (se sincroniza con Bakelite) ---
+        tk.Label(dlg, text="Nombre del terminal:", font=F(10, True), fg=DIM, bg=BG)\
+            .pack(anchor="w", padx=30, pady=(12, 2))
+        fn = tk.Frame(dlg, bg=BG)
+        fn.pack(fill="x", padx=30)
+        entrada_nom = tk.Entry(fn, font=F(12), bg=CARD, fg=TXT, insertbackground=TXT,
+                               relief="flat", bd=8)
+        entrada_nom.pack(side="left", fill="x", expand=True, ipady=2)
+        entrada_nom.insert(0, (self.controlador.nombre_terminal() or "")
+                           if self.controlador else "")
+        self._entrada_nombre = entrada_nom
+        aviso_nom = tk.Label(dlg, text="Se sincroniza con Bakelite: gana el último cambio.",
+                             font=F(9), fg=DIM2, bg=BG)
+        aviso_nom.pack(anchor="w", padx=30, pady=(4, 0))
+
+        def guardar_nombre():
+            nuevo = entrada_nom.get().strip()
+            if not nuevo:
+                aviso_nom.config(text="El nombre no puede quedar vacío.", fg=RED)
+                return
+            if self.controlador is None:
+                return
+            quedo = self.controlador.renombrar_terminal(nuevo, usuario="operador")
+            if quedo is None:
+                aviso_nom.config(text="No se pudo guardar (BD local no disponible).",
+                                 fg=RED)
+                return
+            self._ui_nombre_terminal(quedo)
+            aviso_nom.config(text="Guardado. Se sube a Bakelite en cuanto haya conexión.",
+                             fg=DIM2)
+
+        widgets.RoundedButton(fn, "Guardar", GREEN, "#0c1626", guardar_nombre, BG,
+                              F(10, True), hover="#54e08f", r=10, padx=14, pady=7)\
+            .pack(side="left", padx=(8, 0))
 
         # --- Ubicación del torniquete ---
         tk.Label(dlg, text="Ubicación del torniquete:", font=F(10, True), fg=DIM, bg=BG)\

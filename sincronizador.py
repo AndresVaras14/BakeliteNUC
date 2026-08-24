@@ -32,15 +32,20 @@ log = logging.getLogger("sincronizador")
 
 
 class Sincronizador(threading.Thread):
-    def __init__(self, store, bd_local, on_estado=None):
+    def __init__(self, store, bd_local, on_estado=None, on_nombre=None):
         super().__init__(daemon=True, name="Sincronizador")
         self.store = store
         self.bd_local = bd_local
         self.on_estado = on_estado          # callback(en_linea: bool, ultima: datetime|None)
+        self.on_nombre = on_nombre          # callback(nombre: str) tras sincronizarlo
         self.en_linea = None        # None = todavía no se comprueba
         self.ultima_conexion = None
         self._incidente_abierto = False
         self._ultimo_ping = 0.0
+        self._ultimo_nombre_sync = 0.0
+        # Un 400 o un 404 en el nombre no se reintenta en bucle: se corta hasta
+        # el próximo arranque, cuando la configuración pudo haberse corregido.
+        self._nombre_bloqueado = False
         self._stop = threading.Event()
         self._restaurar_estado()
         self._wake = threading.Event()
@@ -92,6 +97,7 @@ class Sincronizador(threading.Thread):
             self._ping()               # sin nada que subir, solo verifica conexión
             if self.en_linea:
                 self._avisar_incidentes()
+                self._sincronizar_nombre_si_toca()
             return False
 
         # Con cola pendiente, el estado se refresca igual cada
@@ -126,6 +132,7 @@ class Sincronizador(threading.Thread):
 
         if self.en_linea:
             self._avisar_incidentes()
+            self._sincronizar_nombre_si_toca()
         return hubo_fallo_red
 
     # ---- BD local (SQL Server) ----
@@ -396,10 +403,9 @@ class Sincronizador(threading.Thread):
         """Consulta GET /api/terminal/{id} solo para comprobar que el terminal
         existe y está activo en Bakelite.
 
-        El nombre NO se adopta: la fuente del nombre es la BD local, que es la
-        que edita esta aplicación. A la API no se le envía nada del terminal
-        salvo su id. Si los nombres difieren, se deja anotado para poder
-        sincronizarlos más adelante.
+        El nombre no se toca aquí: se sincroniza en ambos sentidos por su propio
+        ciclo (ver sincronizar_nombre y
+        CONTRATO_SINCRONIZACION_NOMBRE_TERMINAL.md).
         """
         if not config.API_URL_TERMINAL:
             return None
@@ -428,12 +434,189 @@ class Sincronizador(threading.Thread):
             if config.USAR_BD_LOCAL:
                 self.bd_local.registrar_error("config", msg, nivel="ERROR")
 
-        local = (self.bd_local.terminal() or {}).get("nombre") if config.USAR_BD_LOCAL else None
-        remoto = datos.get("nombre")
-        if local and remoto and local != remoto:
-            log.info("El nombre del terminal difiere — local: %r · Bakelite: %r. "
-                     "Se mantiene el local.", local, remoto)
+        # El nombre viene en esta respuesta, pero es informativo: adoptarlo aquí
+        # ignoraría las fechas y podría pisar un cambio local más nuevo.
+        self.sincronizar_nombre(forzar=True)
         return datos
+
+    # ---- Sincronización del nombre del terminal ----
+    # CONTRATO_SINCRONIZACION_NOMBRE_TERMINAL.md: el nombre se cambia tanto aquí
+    # como en la web de Bakelite y gana el cambio más reciente. Cada lado guarda
+    # la hora exacta del suyo (NombreFecha) y esa hora decide.
+    @staticmethod
+    def _url_nombre(plantilla):
+        return plantilla.format(id=config.ID_TERMINAL) if plantilla else None
+
+    def _sincronizar_nombre_si_toca(self):
+        """Ritmo propio, mucho más lento que el de las marcas: el nombre no
+        cambia seguido y la comparación no escribe nada."""
+        if (time.monotonic() - self._ultimo_nombre_sync) < config.NOMBRE_SYNC_INTERVALO_SEGUNDOS:
+            return
+        self.sincronizar_nombre()
+
+    def sincronizar_nombre(self, forzar=False):
+        """Deja el nombre igual en la BD local y en Bakelite.
+
+        Si hay un cambio local sin subir va directo al PUT; si no, compara y
+        actúa según el veredicto. Devuelve el nombre vigente, o None si no se
+        pudo resolver (sin red, sin BD o bloqueado por un error definitivo).
+        """
+        if not config.USAR_BD_LOCAL or self._nombre_bloqueado:
+            return None
+        if not (config.API_URL_NOMBRE_COMPARAR and config.API_URL_NOMBRE_HACIA_NUC
+                and config.API_URL_NOMBRE_DESDE_NUC):
+            return None
+        if not forzar and self.en_linea is False:
+            return None            # sin red: el nombre local manda en pantalla
+
+        term = self.bd_local.terminal()
+        if not term:
+            log.warning("No se pudo leer el terminal de la BD local; nombre sin sincronizar.")
+            return None
+        self._ultimo_nombre_sync = time.monotonic()
+
+        # Un cambio local pendiente no necesita comparar: el PUT ya resuelve el
+        # conflicto en una sola llamada (lo aplica o devuelve el nombre vigente).
+        if not term.get("nombre_sincronizado"):
+            return self._subir_nombre(term)
+
+        veredicto = self._comparar_nombre(term)
+        if veredicto == "ACTUALIZAR_LOCAL":
+            return self._bajar_nombre()
+        if veredicto == "ACTUALIZAR_API":
+            return self._subir_nombre(term)
+        if veredicto == "IGUALES":
+            return term.get("nombre")
+        return None
+
+    def _comparar_nombre(self, term):
+        """POST .../comparar — no escribe en ningún lado. Devuelve el veredicto."""
+        fecha = _iso(term.get("nombre_fecha"))
+        if not fecha:
+            log.error("El terminal local no tiene NombreFecha; no se puede comparar.")
+            return None
+        payload = {"nombre": term.get("nombre"), "nombreFecha": fecha,
+                   "nombreOrigen": "LOCAL"}
+        code, cuerpo = self._llamar_nombre(
+            "POST", self._url_nombre(config.API_URL_NOMBRE_COMPARAR), payload)
+        if code != 200:
+            return None
+        try:
+            d = json.loads(cuerpo)
+        except Exception as e:  # noqa: BLE001
+            log.error("Respuesta ilegible al comparar el nombre: %s", e)
+            return None
+        veredicto = d.get("veredicto")
+        if veredicto not in ("IGUALES", "ACTUALIZAR_LOCAL", "ACTUALIZAR_API"):
+            log.error("Veredicto desconocido al comparar el nombre: %r", veredicto)
+            return None
+        if veredicto != "IGUALES":
+            log.info("Nombre del terminal — local: %r · Bakelite: %r → %s",
+                     (d.get("local") or {}).get("nombre"),
+                     (d.get("api") or {}).get("nombre"), veredicto)
+        elif not term.get("nombre_sincronizado"):
+            self.bd_local.marcar_nombre_sincronizado()
+        return veredicto
+
+    def _bajar_nombre(self):
+        """GET .../hacia-nuc — adopta el nombre de Bakelite con SU fecha."""
+        code, cuerpo = self._llamar_nombre(
+            "GET", self._url_nombre(config.API_URL_NOMBRE_HACIA_NUC))
+        if code != 200:
+            return None
+        try:
+            d = json.loads(cuerpo)
+        except Exception as e:  # noqa: BLE001
+            log.error("Respuesta ilegible al bajar el nombre: %s", e)
+            return None
+        if self.bd_local.aplicar_nombre_remoto(d.get("nombre"), d.get("nombreFecha"),
+                                               d.get("nombrePor")):
+            self._notificar_nombre(d.get("nombre"))
+            return d.get("nombre")
+        # El UPDATE no tocó nada: el nombre local ya era más nuevo. Lo resuelve
+        # el PUT del ciclo siguiente; no se pisa nada.
+        log.info("El nombre local es más nuevo que el de Bakelite: no se adopta.")
+        return None
+
+    def _subir_nombre(self, term):
+        """PUT .../desde-nuc — sube el nombre local con la fecha de su cambio."""
+        fecha = _iso(term.get("nombre_fecha"))
+        if not fecha:
+            log.error("El terminal local no tiene NombreFecha; no se puede subir.")
+            return None
+        payload = {"nombre": term.get("nombre"), "nombreFecha": fecha,
+                   "nombrePor": term.get("nombre_por")}
+        code, cuerpo = self._llamar_nombre(
+            "PUT", self._url_nombre(config.API_URL_NOMBRE_DESDE_NUC), payload)
+        if code != 200:
+            return None
+        try:
+            d = json.loads(cuerpo)
+        except Exception as e:  # noqa: BLE001
+            log.error("Respuesta ilegible al subir el nombre: %s", e)
+            return None
+
+        estado = d.get("estado")
+        if estado == "RECHAZADO_POR_ANTIGUEDAD":
+            # Perdió la carrera: la API devuelve el nombre vigente y se adopta
+            # aquí mismo. El conflicto queda cerrado sin una segunda vuelta.
+            log.info("El cambio local perdió la carrera; se adopta %r de Bakelite.",
+                     d.get("nombre"))
+            self.bd_local.aplicar_nombre_remoto(d.get("nombre"), d.get("nombreFecha"))
+            self._notificar_nombre(d.get("nombre"))
+            return d.get("nombre")
+
+        if estado in ("ACTUALIZADO", "SIN_CAMBIOS"):
+            self.bd_local.marcar_nombre_sincronizado()
+            if estado == "ACTUALIZADO":
+                log.info("Nombre %r subido a Bakelite.", d.get("nombre"))
+            return d.get("nombre")
+
+        log.error("Estado desconocido al subir el nombre: %r", estado)
+        return None
+
+    def _llamar_nombre(self, metodo, url, payload=None):
+        """Las tres llamadas del contrato comparten manejo de errores.
+
+        Devuelve (código, cuerpo). El código es None si no hubo respuesta. Un
+        400 o un 404 son definitivos: se bloquea el ciclo del nombre hasta el
+        próximo arranque en vez de reintentar en bucle. El resto (429, 5xx,
+        timeout, red) deja todo pendiente para el ciclo siguiente.
+        """
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload else None
+        cabeceras = {"Content-Type": "application/json"} if payload else {}
+        req = urllib.request.Request(url, data=data, method=metodo, headers=cabeceras)
+        try:
+            with urllib.request.urlopen(req, timeout=config.API_TIMEOUT_SEGUNDOS) as resp:
+                return resp.getcode(), resp.read().decode("utf-8", "ignore")
+        except urllib.error.HTTPError as e:
+            detalle = self._leer(e)
+            if e.code == 404:
+                msg = (f"El idTerminal {config.ID_TERMINAL} no existe en Bakelite: "
+                       "el nombre no se puede sincronizar.")
+                log.error(msg)
+                self.bd_local.registrar_error("config", msg, nivel="CRITICO",
+                                              detalle=detalle[:500])
+                self._nombre_bloqueado = True
+            elif e.code == 400:
+                msg = f"Bakelite rechazó el nombre del terminal (400): {detalle[:300]}"
+                log.error(msg)
+                self.bd_local.registrar_error("config", msg, nivel="ERROR")
+                self._nombre_bloqueado = True
+            else:
+                log.warning("HTTP %s sincronizando el nombre (%s %s).",
+                            e.code, metodo, url)
+            return e.code, detalle
+        except Exception as e:  # noqa: BLE001
+            log.warning("No se pudo sincronizar el nombre (%s %s): %s", metodo, url, e)
+            return None, ""
+
+    def _notificar_nombre(self, nombre):
+        if self.on_nombre and nombre:
+            try:
+                self.on_nombre(nombre)
+            except Exception as e:  # noqa: BLE001
+                log.error("Error notificando el nombre del terminal: %s", e)
 
     # ---- Aviso de cortes a BakeliteApi ----
     def _avisar_incidentes(self):

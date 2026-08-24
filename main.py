@@ -152,6 +152,9 @@ def main():
 
     # Estado "en línea" -> footer con luz + última conexión, por servicio.
     sincronizador.on_estado = lambda en, ult: ui.set_en_linea(en, ult, servicio="bakelite")
+    # Si Bakelite tiene un nombre más nuevo, el sincronizador lo adopta y la
+    # pantalla lo refleja sola, sin reiniciar la app.
+    sincronizador.on_nombre = ui.set_nombre_terminal
 
     # Los indicadores parten en "verificando…", con la última conexión conocida
     # de la BD. Nadie declara una caída hasta comprobarla de verdad: el
@@ -169,8 +172,9 @@ def main():
 
     controlador.comprobar_api_externa()
 
-    # Verificación del terminal contra Bakelite: solo comprueba que el id exista
-    # y esté activo. El nombre se gobierna desde esta app y su BD local.
+    # Verificación del terminal contra Bakelite: comprueba que el id exista y
+    # esté activo, y de paso sincroniza el nombre en ambos sentidos (gana el
+    # cambio más reciente). Ver CONTRATO_SINCRONIZACION_NOMBRE_TERMINAL.md.
     threading.Thread(target=sincronizador.verificar_terminal, daemon=True,
                      name="VerificarTerminal").start()
     sincronizador.start()

@@ -98,6 +98,79 @@ IF NOT EXISTS (SELECT 1 FROM dbo.Terminales WHERE IdTerminal = 1)
     INSERT dbo.Terminales (IdTerminal, Nombre) VALUES (1, N'Terminal 1');
 GO
 
+/* --- Sincronizacion del nombre con Bakelite (last write wins) ---
+   El nombre se cambia tanto aqui (Ajustes) como en la web, y gana el cambio
+   mas reciente. NombreFecha es el unico criterio de desempate y va aparte de
+   FechaModificacion: cambiar la ubicacion no debe hacer que un nombre viejo
+   gane la comparacion. Contrato: CONTRATO_SINCRONIZACION_NOMBRE_TERMINAL.md
+   Se agregan NULL y se endurecen despues, para que corra sobre tablas con datos. */
+IF COL_LENGTH(N'dbo.Terminales', N'NombreFecha') IS NULL
+    ALTER TABLE dbo.Terminales ADD NombreFecha DATETIMEOFFSET(0) NULL;
+GO
+
+IF COL_LENGTH(N'dbo.Terminales', N'NombreOrigen') IS NULL
+    ALTER TABLE dbo.Terminales ADD NombreOrigen VARCHAR(10) NULL;   -- LOCAL / API
+GO
+
+IF COL_LENGTH(N'dbo.Terminales', N'NombrePor') IS NULL
+    ALTER TABLE dbo.Terminales ADD NombrePor NVARCHAR(100) NULL;
+GO
+
+/* Solo existe en el NUC: 0 = el cambio local todavia no se subio a Bakelite. */
+IF COL_LENGTH(N'dbo.Terminales', N'NombreSincronizado') IS NULL
+    ALTER TABLE dbo.Terminales ADD NombreSincronizado BIT NULL;
+GO
+
+/* Las filas que existan de antes heredan la fecha que ya tenian. Si nunca se
+   editaron se usa la de creacion. OJO: en una instalacion nueva esa fecha puede
+   ser mas nueva que el ultimo cambio hecho en la web, y entonces el nombre de
+   fabrica ganaria la comparacion. Antes de arrancar el ciclo, sembrar la fila
+   con el valor de la API (GET /api/terminal/{id}/nombre-terminal/hacia-nuc). */
+UPDATE dbo.Terminales
+   SET NombreFecha        = COALESCE(NombreFecha,
+                                     TODATETIMEOFFSET(
+                                         COALESCE(FechaModificacion, FechaCreacion),
+                                         DATEPART(TZOFFSET, SYSDATETIMEOFFSET()))),
+       NombreOrigen       = COALESCE(NombreOrigen, 'LOCAL'),
+       NombreSincronizado = COALESCE(NombreSincronizado, 0)
+ WHERE NombreFecha IS NULL OR NombreOrigen IS NULL OR NombreSincronizado IS NULL;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.default_constraints WHERE name = N'DF_Terminales_NombreFecha')
+    ALTER TABLE dbo.Terminales ADD CONSTRAINT DF_Terminales_NombreFecha
+        DEFAULT (SYSDATETIMEOFFSET()) FOR NombreFecha;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.default_constraints WHERE name = N'DF_Terminales_NombreOrigen')
+    ALTER TABLE dbo.Terminales ADD CONSTRAINT DF_Terminales_NombreOrigen
+        DEFAULT ('LOCAL') FOR NombreOrigen;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.default_constraints WHERE name = N'DF_Terminales_NombreSync')
+    ALTER TABLE dbo.Terminales ADD CONSTRAINT DF_Terminales_NombreSync
+        DEFAULT (1) FOR NombreSincronizado;
+GO
+
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Terminales')
+             AND name = N'NombreFecha' AND is_nullable = 1)
+    ALTER TABLE dbo.Terminales ALTER COLUMN NombreFecha DATETIMEOFFSET(0) NOT NULL;
+GO
+
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Terminales')
+             AND name = N'NombreOrigen' AND is_nullable = 1)
+    ALTER TABLE dbo.Terminales ALTER COLUMN NombreOrigen VARCHAR(10) NOT NULL;
+GO
+
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Terminales')
+             AND name = N'NombreSincronizado' AND is_nullable = 1)
+    ALTER TABLE dbo.Terminales ALTER COLUMN NombreSincronizado BIT NOT NULL;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_Terminales_NombreOrigen')
+    ALTER TABLE dbo.Terminales ADD CONSTRAINT CK_Terminales_NombreOrigen
+        CHECK (NombreOrigen IN ('LOCAL','API'));
+GO
+
 /* ---------------------------------------------------------------------------
    4. Versiones de la aplicacion
       Pueden cargarse varias, pero solo UNA con Activo = 1. El indice filtrado

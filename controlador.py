@@ -222,6 +222,33 @@ class Controlador:
             log.error("No se pudo abrir la marca en la BD local: %s", e)
             return None
 
+    # ---- Nombre del terminal ----
+    def renombrar_terminal(self, nombre, usuario=None):
+        """Cambia el nombre desde la pantalla de Ajustes.
+
+        Escribe primero en la BD local —así el cambio se ve al instante, haya
+        red o no— y despierta al sincronizador para subirlo enseguida. Si no
+        hay conexión, queda pendiente con su fecha y se sube al reconectar.
+        Devuelve el nombre que quedó, o None si no se pudo guardar.
+        """
+        if self.bd_local is None:
+            log.error("Sin BD local: no se puede renombrar el terminal.")
+            return None
+        term = self.bd_local.renombrar_terminal(nombre, usuario=usuario)
+        if not term:
+            return None
+        if self.sincronizador is not None:
+            threading.Thread(target=self.sincronizador.sincronizar_nombre,
+                             kwargs={"forzar": True}, daemon=True,
+                             name="SubirNombre").start()
+        return term.get("nombre")
+
+    def nombre_terminal(self):
+        """Nombre vigente del terminal según la BD local."""
+        if self.bd_local is None:
+            return None
+        return (self.bd_local.terminal() or {}).get("nombre")
+
     def comprobar_api_externa(self):
         """Comprobación inicial: ¿responde la fuente que valida los RUT? Se
         llama al arrancar, antes de dar por sentado que está caída."""

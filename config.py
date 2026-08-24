@@ -153,11 +153,28 @@ API_TIMEOUT_SEGUNDOS = 10
 API_URL_PING = "https://bakeliteapi.sopytec.cl/api/terminal/health"
 API_URL_INCIDENTES = "https://bakeliteapi.sopytec.cl/api/terminal/incidents"
 
-# Datos del terminal en Bakelite. Solo se consulta para verificar que el
-# idTerminal existe y está activo: el NOMBRE lo manda la BD local y no se
-# envía nada del terminal a la API, únicamente su id.
+# Datos del terminal en Bakelite. Se consulta para verificar que el idTerminal
+# existe y está activo. El NOMBRE ya no se gobierna desde aquí: se sincroniza
+# en ambos sentidos (ver más abajo).
 API_URL_TERMINAL = "https://bakeliteapi.sopytec.cl/api/terminal"
 ID_TERMINAL = 1             # idTerminal asignado a este torniquete (contrato)
+
+# ===== SINCRONIZACIÓN DEL NOMBRE DEL TERMINAL =====
+# El nombre se puede cambiar en el NUC (Ajustes) o en la web de Bakelite. Gana
+# el cambio más reciente: cada lado guarda la hora exacta en que lo cambió
+# (NombreFecha) y esa hora es el único criterio de desempate.
+# Contrato: CONTRATO_SINCRONIZACION_NOMBRE_TERMINAL.md
+# {id} se reemplaza por ID_TERMINAL.
+API_URL_NOMBRE_COMPARAR = "https://bakeliteapi.sopytec.cl/api/terminal/{id}/nombre-terminal/comparar"
+API_URL_NOMBRE_HACIA_NUC = "https://bakeliteapi.sopytec.cl/api/terminal/{id}/nombre-terminal/hacia-nuc"
+API_URL_NOMBRE_DESDE_NUC = "https://bakeliteapi.sopytec.cl/api/terminal/{id}/nombre-terminal/desde-nuc"
+# Cada cuánto se compara el nombre con Bakelite. El nombre no cambia seguido y
+# la comparación no escribe nada, así que 5 minutos sobra. Un cambio hecho en
+# esta app no espera el ciclo: se sube al instante.
+NOMBRE_SYNC_INTERVALO_SEGUNDOS = 300
+# Margen que la API tolera hacia el futuro. Si el reloj del NUC se adelanta más
+# que esto, la API responde 400 y el cambio no se sube.
+NOMBRE_SYNC_MARGEN_FUTURO_SEGUNDOS = 300
 
 # ===== VID:PID relevantes =====
 CH340_VIDPID = "1a86:7523"   # CH340 (lectoras Aigather y clones)
