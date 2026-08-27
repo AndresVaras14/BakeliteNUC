@@ -50,8 +50,35 @@ RED = "#f0554f"
 YELLOW = "#f6c344"
 OFFC = "#33425c"
 
+# Familia tipográfica. Se ajusta al arrancar a una que exista de verdad en el
+# equipo: DejaVu viene en Debian/Ubuntu pero no en Windows, y Tk sustituye en
+# silencio por una cualquiera, con lo que la pantalla queda distinta sin avisar.
 FAM = "DejaVu Sans"
-FUENTE_TTF = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FAMILIAS_PREFERIDAS = ("DejaVu Sans", "Noto Sans", "Liberation Sans",
+                       "Segoe UI", "Arial", "Helvetica")
+
+# Archivo .ttf para el texto con halo del veredicto (Pillow necesita el archivo,
+# no el nombre de la familia). Se prueba en orden y se usa el primero que exista.
+FUENTES_TTF = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",       # Debian/Ubuntu
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",                # Fedora/otros
+    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",                   # Arch
+    "C:/Windows/Fonts/segoeuib.ttf",                              # Windows
+    "C:/Windows/Fonts/arialbd.ttf",                               # Windows
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",          # macOS
+)
+
+
+def _ruta_fuente():
+    """Primer .ttf disponible. None si no hay ninguno: entonces el veredicto se
+    dibuja como texto plano, sin halo, en vez de fallar."""
+    for ruta in FUENTES_TTF:
+        if os.path.exists(ruta):
+            return ruta
+    return None
+
+
+FUENTE_TTF = _ruta_fuente()
 
 CARD_W, CARD_H = 860, 168
 HIST_W, HIST_H = 860, 300
@@ -139,6 +166,16 @@ class Interfaz:
         self._texto_debug = None
 
         self.root = tk.Tk()
+
+        global FAM
+        disponibles = set(tkfont.families(self.root))
+        for familia in FAMILIAS_PREFERIDAS:
+            if familia in disponibles:
+                if familia != FAM:
+                    log.info("La familia %r no está instalada; se usa %r.", FAM, familia)
+                FAM = familia
+                break
+
         self.root.title(f"{config.MARCA} — {config.APP_TITULO}")
         self.root.configure(bg=BG)
         self.root.geometry("1440x860")
@@ -552,6 +589,9 @@ class Interfaz:
         clave = (texto, color, tam)
         if clave in self._cache_brillo:
             return self._cache_brillo[clave]
+        if not FUENTE_TTF:
+            self._cache_brillo[clave] = None
+            return None
         try:
             from PIL import Image, ImageDraw, ImageFont, ImageFilter
             fuente = ImageFont.truetype(FUENTE_TTF, tam)
