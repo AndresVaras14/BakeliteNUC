@@ -3,7 +3,7 @@
 Orquestador: une lectora -> validación -> luz + relé -> pantalla -> registro.
 
 Flujo de un acceso (§7):
-  1. inicio_lectura(sentido): al primer byte enciende AZUL (relé + pantalla) y
+  1. inicio_lectura(numero): al primer byte enciende AZUL (relé + pantalla) y
      lo mantiene HASTA que llega la respuesta.
   2. procesar_trama(...): extrae el RUT y, en este orden:
        a) abre la marca en la BD local: RUT, evento y fecha/hora (dbo.Marcas).
@@ -35,10 +35,16 @@ import threading
 import logging
 
 import config
+from depurador import depurador
 from rut import fn_enmascara_rut, formatea_rut
 from validador import Resultado, MENSAJES
 
 log = logging.getLogger("controlador")
+
+# Cuánto se ignora lo que llegue de una lectora recién identificada: cubre el
+# resto del escaneo en curso (la trama completa, o el timeout de lectura
+# incompleta) sin tragarse un acceso real hecho después.
+IDENTIFICAR_DESCARTE_SEGUNDOS = 5.0
 
 
 class Controlador:
@@ -51,30 +57,48 @@ class Controlador:
         self.store = store
         self.sincronizador = sincronizador
         self.bd_local = bd_local
+        self.dispositivos = None     # lo enchufa main al arrancar
         self._lock = threading.Lock()
         self._timer_idle = None
-        self._cooldown = {}   # sentido nominal -> time.monotonic() del último proceso
-        self._ultimo_rut = {}  # sentido nominal -> (rut, time.monotonic())
+        self._cooldown = {}   # número de lectora -> time.monotonic() del último proceso
+        self._ultimo_procesado = {}   # número de lectora -> último RUT consultado
+        self._ultimo_rut = {}  # número de lectora -> (rut, time.monotonic())
+        self._identificando = None   # callback(numero) mientras se identifica
+        self._descartar = {}         # numero -> hasta cuándo se ignora lo que llegue
+        self._ocupada = {}           # número de lectora -> cuándo empezó su trámite
+        self._ui_consultando = False  # la pantalla quedó mostrando "consultando"
 
     # ---- Anti-doble-lectura ----
-    def _en_cooldown(self, sentido):
-        t = self._cooldown.get(sentido, 0.0)
+    # La clave es el NÚMERO de lectora, no el sentido: cambiar cuál es entrada
+    # no debe arrastrar el cooldown de la otra.
+    def _en_cooldown(self, numero):
+        t = self._cooldown.get(numero, 0.0)
         return (time.monotonic() - t) < config.LECTURA_COOLDOWN_SEGUNDOS
 
-    def _marcar_lectura(self, sentido):
-        self._cooldown[sentido] = time.monotonic()
+    def _marcar_lectura(self, numero):
+        self._cooldown[numero] = time.monotonic()
 
-    def _repetida(self, sentido, rut):
-        """True si es la MISMA cédula que se acaba de leer en esta lectora.
-        Cada lectura repetida reinicia la ventana: mientras la cédula siga
-        apoyada sobre el lector, no se vuelve a consultar."""
+    def _anotar_lectura(self, numero, rut):
+        """Deja constancia de que la cédula sigue sobre el lector, sin procesarla."""
+        if rut != "0":
+            self._ultimo_rut[numero] = (rut, time.monotonic())
+
+    def _repetida(self, numero, rut):
+        """¿Es la misma cédula que sigue apoyada sobre el lector?
+
+        Lo que decide es la PAUSA entre lecturas, no cuánto rato pasó desde la
+        primera. Apoyada, la lectora repite cada pocas décimas y no se vuelve a
+        consultar por mucho que se quede ahí. Si la persona la retira y la pasa
+        de nuevo, ese silencio hace que cuente como pasada nueva y se consulta
+        enseguida, sin esperas raras.
+        """
         if rut == "0":
             return False
-        anterior, t = self._ultimo_rut.get(sentido, (None, 0.0))
+        anterior, t = self._ultimo_rut.get(numero, (None, 0.0))
         ahora = time.monotonic()
         repetida = (anterior == rut and
-                    (ahora - t) < config.LECTURA_MISMO_RUT_SEGUNDOS)
-        self._ultimo_rut[sentido] = (rut, ahora)
+                    (ahora - t) < config.LECTURA_PAUSA_REINICIO_SEGUNDOS)
+        self._ultimo_rut[numero] = (rut, ahora)
         return repetida
 
     # ---- Estado en caliente ----
@@ -100,54 +124,253 @@ class Controlador:
         if self.ui:
             self.ui.set_luz(color)
 
+    # ---- Identificación de lectoras ----
+    # Las lectoras son escáneres: solo leen, no hay comando para hacerlas
+    # parpadear. Para saber cuál es cuál se usa lo único que sí hacen: leer.
+    # Con el modo activo, el primer escaneo que llegue delata su lectora y no
+    # se procesa como marca (no abre torniquete ni registra nada).
+    def iniciar_identificacion(self, callback):
+        """callback(numero, rut) se llama con la lectora que haya leído.
+
+        `rut` viene formateado para pantalla, o None si la lectura fue inválida
+        (igual sirve para identificar: delata la lectora aunque no se entienda).
+        """
+        with self._lock:
+            self._identificando = callback
+        log.info("Modo identificación de lectoras ACTIVO.")
+
+    def cancelar_identificacion(self):
+        with self._lock:
+            self._identificando = None
+        log.info("Modo identificación de lectoras cancelado.")
+
+    def _identificar(self, numero, rut=None):
+        """Devuelve True si la lectura se consumió identificando."""
+        if self._descartando(numero):
+            return True
+        cb = self._identificando
+        if cb is None:
+            return False
+        self._identificando = None
+        # El modo se consume con el PRIMER BYTE, pero la trama completa llega
+        # unos milisegundos después. Sin esta ventana, esa trama entraría como
+        # un acceso normal: abriría el torniquete, guardaría la marca y
+        # consultaría a la API externa. Identificar no debe hacer nada de eso.
+        self._descartar[numero] = time.monotonic() + IDENTIFICAR_DESCARTE_SEGUNDOS
+        log.info("Lectora %s identificada por escaneo (su lectura se descarta).",
+                 numero)
+        try:
+            cb(numero, rut)
+        except Exception as e:  # noqa: BLE001
+            log.error("Error en el callback de identificación: %s", e)
+        return True
+
+    def _lectora_ocupada(self, numero):
+        """¿Esta lectora tiene un trámite en curso?
+
+        Si el trámite lleva más de lo que puede tardar en el peor caso, algo
+        quedó colgado —una consulta que nunca volvió, la BD trabada— y se libera
+        por la fuerza. Es la diferencia entre perder una lectura y que la lectora
+        quede muerta hasta el próximo reinicio.
+        """
+        desde = self._ocupada.get(numero)
+        if desde is None:
+            return False
+        if (time.monotonic() - desde) < config.OCUPADA_MAX_SEGUNDOS:
+            return True
+        self._ocupada.pop(numero, None)
+        self._ui_consultando = False
+        msg = (f"La lectora {numero} quedó ocupada más de "
+               f"{config.OCUPADA_MAX_SEGUNDOS} s: se liberó por la fuerza para "
+               "poder seguir atendiendo.")
+        log.error(msg)
+        depurador.respuesta(msg, origen="controlador")
+        if self.bd_local is not None:
+            try:
+                self.bd_local.registrar_error("controlador", msg, nivel="ERROR")
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            self.arduino.apagar_luz()
+        except Exception:  # noqa: BLE001
+            pass
+        if self.ui:
+            self.ui.mostrar_esperando()
+        return False
+
+    def _descartando(self, numero):
+        """¿Lo que llegue de esta lectora es la cola de una identificación?"""
+        hasta = self._descartar.get(numero, 0.0)
+        if time.monotonic() >= hasta:
+            self._descartar.pop(numero, None)
+            return False
+        return True
+
     # ---- Llamado por la lectora ----
-    def inicio_lectura(self, sentido="E"):
-        """Primer byte: azul se mantiene (relé + pantalla) hasta la respuesta."""
-        if self._en_cooldown(sentido):
-            return
+    def inicio_lectura(self, numero=1):
+        """Primer byte de una lectura.
+
+        No pinta nada, a propósito. Antes encendía el azul y ponía
+        "consultando" aquí, pero en el primer byte todavía no se sabe si esa
+        lectura se va a procesar: una cédula apoyada sobre el lector manda
+        ráfagas sin parar y casi todas se descartan por repetidas. El resultado
+        era una pantalla que decía "consultando" para una consulta que nunca
+        existió, y que se quedaba así hasta la lectura siguiente.
+
+        Ahora el azul lo enciende procesar_trama, justo antes de consultar, así
+        el azul y el mensaje duran exactamente lo que dura la consulta.
+        """
+        return
+
+    def _empezar_consulta(self, sentido):
+        """Enciende el azul y muestra "consultando". Solo se llama cuando la
+        consulta va de verdad, así siempre hay un resultado que lo reemplace."""
         self._cancelar_idle()
         self.arduino.luz_azul()             # L1B*
         self._luz_ui("azul")
+        self._ui_consultando = True
         if self.ui:
             self.ui.mostrar_consultando(sentido)
 
-    def _sentido_efectivo(self, sentido):
-        return self.ajustes.sentido_efectivo(sentido) if self.ajustes else sentido
+    def _sentido_efectivo(self, numero):
+        """El sentido lo manda la configuración de la BD, por número de lectora."""
+        if self.ajustes:
+            return self.ajustes.sentido_lectora(numero)
+        return config.SENTIDO_LECTORA1 if numero == 1 else config.SENTIDO_LECTORA2
 
-    def procesar_trama(self, trama, numero, sentido, simular_sin_conexion=False):
+    def procesar_trama(self, trama, numero, sentido=None, simular_sin_conexion=False):
+        # Mientras hay una consulta en curso, lo que siga llegando de esa
+        # lectora es la misma cédula que sigue apoyada. Se anota que se la vio
+        # —para que al terminar la consulta no parezca una pasada nueva— y se
+        # descarta sin tocar el lock. Encolarlas era el error: se quedaban
+        # esperando 7 segundos y salían todas juntas como si fueran cédulas
+        # recién presentadas.
+        if self._lectora_ocupada(numero):
+            self._anotar_lectura(numero, fn_enmascara_rut(trama))
+            return
+
         with self._lock:
-            if self._en_cooldown(sentido):
-                log.info("Lectura ignorada por cooldown (%s)", sentido)
+            if self._identificando is not None or self._descartando(numero):
+                self._identificar(numero, formatea_rut(fn_enmascara_rut(trama)) or None)
                 return
-            self._marcar_lectura(sentido)
-            s_ef = self._sentido_efectivo(sentido)
-
+            # El orden importa: PRIMERO se anota la lectura, después se decide
+            # si se procesa. Con el cooldown adelante, las lecturas que él
+            # descartaba no llegaban a anotarse y el detector de repetición se
+            # quedaba ciego: cada 2 s creía ver una cédula nueva y volvía a
+            # consultar aunque fuera la misma apoyada sobre el lector.
             rut_norm = fn_enmascara_rut(trama)
-            if self._repetida(sentido, rut_norm):
-                log.info("Lectura repetida de la misma cédula ignorada (%s, RUT %s)",
-                         sentido, rut_norm)
+            if self._repetida(numero, rut_norm):
+                log.debug("La misma cédula sigue sobre la lectora %s (RUT %s).",
+                          numero, rut_norm)
                 return
 
+            # El cooldown existe para que un mismo escaneo no dispare dos
+            # consultas. No debe frenar a la persona siguiente: en un torniquete
+            # la gente pasa una detrás de otra, y una cédula distinta es un
+            # acceso distinto que merece respuesta ya.
+            otra_persona = (rut_norm != "0" and
+                            rut_norm != self._ultimo_procesado.get(numero))
+            if self._en_cooldown(numero) and not otra_persona:
+                log.info("Lectura ignorada por cooldown (lectora %s)", numero)
+                return
+            self._marcar_lectura(numero)
+            self._ultimo_procesado[numero] = rut_norm
+            s_ef = self._sentido_efectivo(numero)
+            depurador.respuesta(
+                f"Lectora {numero} ({'ENTRADA' if s_ef == 'E' else 'SALIDA'}) leyó "
+                f"el RUT {formatea_rut(rut_norm) or rut_norm}", origen="lectora")
+            if self.bd_local is not None:
+                self.bd_local.registrar_lectura(numero)
+
+            # De aquí hasta el resultado, esta lectora queda tomada: mientras
+            # su luz esté azul no se valida nada más en ella. El finally del
+            # trámite es lo que garantiza que se libere pase lo que pase.
+            self._ocupada[numero] = time.monotonic()
+
+        # El trámite sale del hilo de la lectora. Si se hiciera aquí, ese hilo
+        # quedaría bloqueado hasta 7 s sin vaciar el puerto: la lectora dejaría
+        # de leer y al volver procesaría de golpe todo lo acumulado. Así sigue
+        # leyendo, y lo que llegue mientras tanto se descarta por `_ocupada`.
+        threading.Thread(target=self._tramitar, daemon=True, name=f"Acceso{numero}",
+                         args=(rut_norm, s_ef, numero, simular_sin_conexion)).start()
+
+    def _tramitar(self, rut_norm, s_ef, numero, simular_sin_conexion=False):
+        """Marca, consulta y resultado. Corre fuera del hilo de la lectora."""
+        try:
             # a) La cédula ya pasó: se guarda la marca antes de preguntar nada.
             marca = self._abrir_marca(rut_norm, s_ef)
 
             # b) Consulta a la API externa (hoy la resuelve el Validador).
+            self._empezar_consulta(s_ef)
             t0 = time.monotonic()
-            resultado = self.validador.validar(
-                rut_norm, s_ef, simular_sin_conexion=simular_sin_conexion)
+            depurador.accion(f"Consultar acceso del RUT {rut_norm}", origen="api")
+            resultado = self._validar_con_limite(rut_norm, s_ef, simular_sin_conexion)
             ms = int((time.monotonic() - t0) * 1000)
+            depurador.respuesta(
+                f"Respuesta en {ms} ms: código {resultado.codigo} · "
+                f"{resultado.mensaje}", origen="api")
 
-            # c) Se guarda la respuesta sobre esa misma marca.
-            self._cerrar_consulta(marca, resultado, ms)
-            self._aplicar(resultado, marca)
+            # c) Se guarda la respuesta sobre esa misma marca. La pantalla y el
+            #    semáforo son uno solo, así que esto sí va serializado.
+            with self._lock:
+                self._cerrar_consulta(marca, resultado, ms)
+                self._aplicar(resultado, marca)
+        except Exception as e:  # noqa: BLE001
+            log.error("Error tramitando el acceso (lectora %s): %s", numero, e)
+        finally:
+            self._ocupada.pop(numero, None)
 
-    def reportar_error(self, sentido):
-        """Lectura incompleta/timeout de la lectora -> código 3."""
+    def _validar_con_limite(self, rut_norm, sentido, simular_sin_conexion=False):
+        """Consulta con tope de tiempo.
+
+        La luz azul y el "consultando" duran exactamente lo que tarde la
+        respuesta, porque esta llamada es la que los mantiene. Si la API no
+        contesta dentro de VALIDACION_TIMEOUT_SEGUNDOS se corta el trámite y se
+        le pide a la persona que vuelva a intentar: dejar la pantalla colgada
+        indefinidamente es peor que decirle que reintente.
+
+        La consulta corre en un hilo aparte para poder abandonarla. Si contesta
+        tarde, esa respuesta ya no sirve —a la persona se le dijo otra cosa— y
+        se descarta.
+        """
+        caja = {}
+
+        def consultar():
+            try:
+                caja["r"] = self.validador.validar(
+                    rut_norm, sentido, simular_sin_conexion=simular_sin_conexion)
+            except Exception as e:  # noqa: BLE001
+                caja["error"] = e
+
+        hilo = threading.Thread(target=consultar, daemon=True, name="ValidarAcceso")
+        hilo.start()
+        hilo.join(config.VALIDACION_TIMEOUT_SEGUNDOS)
+
+        if "r" in caja:
+            return caja["r"]
+        if "error" in caja:
+            # La consulta falló (red, servicio caído): eso es "sin conexión".
+            log.error("La consulta de acceso falló: %s", caja["error"])
+            return Resultado(4, MENSAJES[4], False, sentido, rut_norm)
+
+        log.warning("La API externa no respondió en %s s (RUT %s): se pide reintentar.",
+                    config.VALIDACION_TIMEOUT_SEGUNDOS, rut_norm)
+        return Resultado(5, MENSAJES[5], False, sentido, rut_norm)
+
+    def reportar_error(self, numero, sentido=None):
+        """Lectura incompleta/timeout de la lectora -> código 3.
+
+        Una lectura fallida igual sirve para identificar: delata la lectora."""
         with self._lock:
-            if self._en_cooldown(sentido):
+            if self._identificar(numero):
                 return
-            self._marcar_lectura(sentido)
-            self._aplicar(Resultado(3, MENSAJES[3], False, self._sentido_efectivo(sentido)), None)
+            if self._en_cooldown(numero):
+                return
+            self._marcar_lectura(numero)
+            if self._lectora_ocupada(numero):
+                return      # hay una consulta en curso: no se pisa su resultado
+            self._aplicar(Resultado(3, MENSAJES[3], False,
+                                    self._sentido_efectivo(numero)), None)
 
     def probar_rele(self, sentido_logico):
         """Dispara el relé correspondiente a un sentido lógico (para calibrar)."""
@@ -155,6 +378,20 @@ class Controlador:
             else (config.RELE1 if sentido_logico == "E" else config.RELE2)
         log.info("Prueba de relé %s -> %s", sentido_logico, cmd)
         self.arduino.pulso(cmd)
+
+    def probar_rele_numero(self, numero):  # noqa: D401
+        """Dispara un relé por su número físico, sin importar qué sentido tenga.
+
+        Es lo que permite reconocerlo: se acciona el relé 1, se mira qué
+        torniquete se abrió, y recién ahí se decide si es entrada o salida.
+        """
+        cmd = (self.ajustes.comando_de_rele(numero) if self.ajustes
+               else (config.RELE1 if numero == 1 else config.RELE2))
+        log.info("Prueba del relé %s -> %s", numero, cmd)
+        self.arduino.pulso(cmd)
+        if self.bd_local is not None:
+            self.bd_local.registrar_disparo_rele(numero)
+        return cmd
 
     def probar_luz(self, color):
         """Enciende una luz del semáforo (para probar el Arduino)."""
@@ -174,19 +411,24 @@ class Controlador:
     # ---- Aplicar resultado a hardware + UI + registro ----
     def _aplicar(self, resultado, marca=None):
         codigo = resultado.codigo
+        self._ui_consultando = False
 
         if codigo == 1:                                  # HABILITADO
             # 1º el relé: el torniquete se libera primero.
             if self.ajustes:
                 self.arduino.pulso(self.ajustes.comando_rele(resultado.sentido))
+                numero_rele = self.ajustes.numero_rele(resultado.sentido)
             else:
                 self.arduino.pulso_rele(resultado.sentido)
+                numero_rele = 1 if resultado.sentido == "E" else 2
+            if self.bd_local is not None and numero_rele:
+                self.bd_local.registrar_disparo_rele(numero_rele)
             # 2º la luz verde, ya con el paso liberado.
             if config.RETARDO_RELE_LUZ_SEGUNDOS > 0:
                 time.sleep(config.RETARDO_RELE_LUZ_SEGUNDOS)
             self.arduino.luz_verde()
             self._luz_ui("verde")
-        elif codigo == 4:                                # SIN CONEXIÓN
+        elif codigo in (4, 5):                           # SIN CONEXIÓN / SIN RESPUESTA
             self.arduino.luz_amarilla()
             self.arduino.apagar_luz_despues(config.APAGAR_LUZ_AMARILLA_DESPUES)
             self._luz_ui("amarillo")
@@ -221,6 +463,12 @@ class Controlador:
         except Exception as e:  # noqa: BLE001
             log.error("No se pudo abrir la marca en la BD local: %s", e)
             return None
+
+    def notificar_dispositivos(self):
+        """Algo cambió en la configuración de lectoras o relés: se informa a
+        Bakelite al instante en vez de esperar el ciclo."""
+        if self.dispositivos is not None:
+            self.dispositivos.notificar()
 
     # ---- Nombre del terminal ----
     def renombrar_terminal(self, nombre, usuario=None):
@@ -353,12 +601,16 @@ class Controlador:
     def simular(self, valor, sentido="E", sin_conexion=False, error_lectura=False):
         """Inyecta un acceso como si lo hubiera leído una lectora.
         Se ejecuta en un hilo aparte para no bloquear la UI durante la consulta."""
+        # Se simula por sentido, así que se busca qué lectora lo cumple hoy.
+        numero = (self.ajustes.numero_lectora(sentido) if self.ajustes else None) \
+            or (1 if sentido == "E" else 2)
+
         def worker():
-            self.inicio_lectura(sentido)
+            self.inicio_lectura(numero)
             if error_lectura:
                 trama = "BASURA-SIN-FORMATO-XYZ"
             else:
                 trama = f"?RUN={valor}&SEC=1"
-            self.procesar_trama(trama, 0, sentido, simular_sin_conexion=sin_conexion)
+            self.procesar_trama(trama, numero, simular_sin_conexion=sin_conexion)
 
         threading.Thread(target=worker, daemon=True).start()

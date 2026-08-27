@@ -21,8 +21,10 @@ import datetime
 import tempfile
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 
 import config
+from depurador import depurador
 import widgets
 from rut import formatea_rut
 
@@ -36,6 +38,8 @@ MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
 BG = "#0f1c33"
 CARD = "#182a45"
 CARD_BD = "#2b4066"
+# Filete y contornos: apenas se despega del panel, lo justo para separar.
+BORDE = "#24395e"
 ROW_BG = "#14243d"   # (sin uso: las filas del historial van sobre el fondo del panel)
 TXT = "#e8eef7"
 DIM = "#8ea3c0"
@@ -47,6 +51,7 @@ YELLOW = "#f6c344"
 OFFC = "#33425c"
 
 FAM = "DejaVu Sans"
+FUENTE_TTF = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 CARD_W, CARD_H = 860, 168
 HIST_W, HIST_H = 860, 300
@@ -54,6 +59,26 @@ NOMBRE_MAX = 24
 NOMBRE_HIST_MAX = 22
 MOTIVO_HIST_MAX = 26        # motivo del rechazo en la tabla acumulada
 HIST_FILAS = 5              # filas fijas de la tabla (no se recrean)
+# Lado de la luz del modo PC. El tope lo pone la columna, que mide 250 px por
+# el panel de la leyenda: más que eso ensancharía toda la fila.
+LUZ_PC_LADO = 236
+
+# Mensaje de reposo del modo torniquete. Dos líneas: la primera dice qué hacer,
+# la segunda por qué. "EN ESPERA" a secas no le decía nada a quien llega.
+# Cómo se ve cada código de respuesta: rótulo corto y color. Se usa tanto en el
+# evento actual como en el que queda guardado abajo.
+VEREDICTO = {
+    1: ("AUTORIZADO", GREEN),
+    0: ("DENEGADO", RED),
+    2: ("ERROR DE LECTURA", RED),
+    3: ("ERROR DE LECTURA", RED),
+    4: ("SIN CONEXIÓN", YELLOW),
+    5: ("SIN RESPUESTA", YELLOW),
+}
+RADIO_PASTILLA = 8          # "un poco redondeado", no una cápsula
+
+ESPERA_TITULO = "ACERQUE SU CÉDULA AL LECTOR"
+ESPERA_AYUDA = "El sistema está listo y esperando a que pase su cédula de identidad."
 # El más reciente se muestra en el panel grande "ÚLTIMO REGISTRO", así que la
 # tabla arranca en el segundo. Se guarda uno más para no perder ninguno.
 HIST_MEMORIA = HIST_FILAS + 1
@@ -100,12 +125,27 @@ class Interfaz:
         self._dlg = None
         self._dlg_estado = None
         self._entrada_nombre = None
+        self._dlg_seccion = None
+        self.modo = "pc"
+        self._vista_torniquete = None
+        self._t_ultimo = None          # último acceso mostrado abajo
+        self._t_escala = 1.0           # factor de tamaño de letra del torniquete
+        self._cache_luz = {}           # (color, lado) -> imagen ya generada
+        self._cache_brillo = {}        # (texto, color, tam) -> texto con halo
+        self._estado_servicios = {}    # servicio -> (en_linea, texto)
+        self._zonas_pc = []
+        self.debug_activo = False
+        self._panel_debug = None
+        self._texto_debug = None
 
         self.root = tk.Tk()
         self.root.title(f"{config.MARCA} — {config.APP_TITULO}")
         self.root.configure(bg=BG)
         self.root.geometry("1440x860")
-        self.root.minsize(1200, 760)
+        # El mínimo tiene que caber en la pantalla del torniquete (800x600).
+        # El modo PC conserva su diseño: si la ventana queda chica, el
+        # contenedor con scroll se encarga.
+        self.root.minsize(800, 600)
         self.root.report_callback_exception = self._on_tk_error
         try:
             self.root.attributes("-fullscreen", True)
@@ -113,7 +153,7 @@ class Interfaz:
             pass
         self.root.bind("<Escape>", lambda e: self.root.attributes("-fullscreen", False))
         self.root.bind("<F11>", self._toggle_fs)
-        self.root.bind("<F2>", lambda e: self._abrir_ajustes())
+        self.root.bind("<F2>", lambda e: self._abrir_ajustes("ajustes"))
 
         self._preparar_badges()
         self._preparar_luces()
@@ -129,12 +169,24 @@ class Interfaz:
         self.root.after(50, self._drenar_cola)
         self.mostrar_esperando()
 
+        # El equipo arranca como pantalla de torniquete: es su uso normal. El
+        # modo PC queda a un clic para operar o configurar.
+        self.set_modo("torniquete")
+
         if not self.sim and not all(self.estado_hw.values()):
             self.root.after(400, self._abrir_estado)
 
     # ================= construcción =================
     def _construir(self):
-        r = self.root
+        # Toda la aplicación vive dentro de un contenedor con scroll, no
+        # directamente sobre la ventana. En modo debugger la pantalla se parte
+        # en dos y esta mitad queda angosta: sin scroll, el pie y los botones
+        # quedarían fuera de alcance.
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+        self._sistema, self._sistema_barra = self._contenedor_sistema()
+
+        r = self._sistema
         r.grid_rowconfigure(2, weight=1)
         r.grid_columnconfigure(0, weight=1)
         self._barra_superior()
@@ -142,6 +194,10 @@ class Interfaz:
         self._centro()
         self._pie()
         self._powered_by()
+        # Lo que desaparece en modo torniquete. La barra superior no está aquí
+        # a propósito: contiene el switch para volver a modo PC.
+        self._zonas_pc = [w for w in self._sistema.grid_slaves()
+                          if int(w.grid_info().get("row", 0)) > 0]
         if self.sim:
             tk.Label(
                 r,
@@ -150,8 +206,661 @@ class Interfaz:
                 font=F(9), fg=DIM2, bg=BG,
             ).grid(row=4, column=0, pady=(0, 8))
 
+    RUEDA = ("<MouseWheel>", "<Button-4>", "<Button-5>")
+
+    def _enganchar_rueda(self, zona, lienzo, hay_scroll=None):
+        """Hace que la rueda desplace `lienzo` mientras el puntero esté sobre
+        `zona`.
+
+        Antes esto se hacía con bind_all, que instala el manejador para toda la
+        aplicación: cada diálogo nuevo pisaba al anterior y, al cerrarse, dejaba
+        uno apuntando a widgets ya destruidos. Mover la rueda después reventaba
+        con «bad window path name». Enganchando al entrar y soltando al salir
+        —y al destruirse— no quedan manejadores huérfanos.
+        """
+        def rueda(e):
+            if hay_scroll is not None and not hay_scroll():
+                return
+            try:
+                lienzo.yview_scroll(-1 if getattr(e, "num", 0) == 4 or
+                                    getattr(e, "delta", 0) > 0 else 1, "units")
+            except tk.TclError:
+                self._soltar_rueda()
+
+        def entrar(_e=None):
+            for sec in self.RUEDA:
+                self.root.bind_all(sec, rueda)
+
+        zona.bind("<Enter>", entrar)
+        zona.bind("<Leave>", lambda e: self._soltar_rueda())
+        zona.bind("<Destroy>", lambda e: self._soltar_rueda())
+
+    def _soltar_rueda(self):
+        for sec in self.RUEDA:
+            try:
+                self.root.unbind_all(sec)
+            except tk.TclError:
+                pass
+
+    def _contenedor_sistema(self):
+        """La app dentro de un canvas: permite desplazarla cuando no cabe.
+
+        El alto del contenido se fuerza al del canvas mientras quepa, para que
+        la pantalla siga estirándose como siempre; solo cuando de verdad no
+        entra se le deja su alto natural y aparece la barra.
+        """
+        marco = tk.Frame(self.root, bg=BG)
+        marco.grid(row=0, column=0, sticky="nsew")
+
+        lienzo = tk.Canvas(marco, bg=BG, highlightthickness=0)
+        barra = tk.Scrollbar(marco, orient="vertical", command=lienzo.yview,
+                             bg=CARD_BD, troughcolor=BG, activebackground=DIM2,
+                             highlightthickness=0, borderwidth=0, relief="flat",
+                             width=10)
+        interno = tk.Frame(lienzo, bg=BG)
+        ventana = lienzo.create_window((0, 0), window=interno, anchor="nw")
+        lienzo.configure(yscrollcommand=barra.set)
+        lienzo.pack(side="left", fill="both", expand=True)
+
+        def ajustar(evento=None):
+            # Las medidas se toman del propio evento cuando viene del canvas:
+            # winfo_height() durante un <Configure> todavía informa el tamaño
+            # anterior, y con eso el contenido se quedaba con el alto viejo
+            # (una ventana achicada a 600 seguía midiendo 848 por dentro).
+            if evento is not None and evento.widget is lienzo:
+                ancho, alto = evento.width, evento.height
+            else:
+                ancho, alto = lienzo.winfo_width(), lienzo.winfo_height()
+            necesario = interno.winfo_reqheight()
+            lienzo.itemconfig(ventana, width=ancho, height=max(necesario, alto))
+            lienzo.configure(scrollregion=lienzo.bbox("all"))
+            sobra = necesario > alto
+            if sobra and not barra.winfo_ismapped():
+                barra.pack(side="right", fill="y", before=lienzo)
+            elif not sobra and barra.winfo_ismapped():
+                barra.pack_forget()
+
+        interno.bind("<Configure>", ajustar)
+        lienzo.bind("<Configure>", ajustar)
+        # El alto del contenido queda fijado por itemconfig, así que si el
+        # ajuste no vuelve a correr se conserva el de antes. Cambiar de modo no
+        # dispara <Configure> del canvas, y la vista quedaba con el alto viejo.
+        self._ajustar_sistema = lambda: ajustar(None)
+
+        self._enganchar_rueda(marco, lienzo, hay_scroll=barra.winfo_ismapped)
+        return interno, barra
+
+    # ================= Modo de pantalla =================
+    # "pc" es la vista completa de siempre. "torniquete" deja solo lo que le
+    # sirve a quien está pasando: la luz y su resultado, en grande, para una
+    # pantalla de 800 a 1024 px de ancho.
+    def set_modo(self, modo):
+        if modo not in ("pc", "torniquete") or modo == self.modo:
+            return
+        self.modo = modo
+        depurador.accion(f"Cambio a modo {modo.upper()}", origen="interfaz")
+        if modo == "torniquete":
+            for zona in self._zonas_pc:
+                zona.grid_remove()
+            if self._vista_torniquete is None:
+                self._construir_torniquete()
+            self._vista_torniquete.grid()
+            self._sincronizar_torniquete()
+        else:
+            if self._vista_torniquete is not None:
+                self._vista_torniquete.grid_remove()
+            for zona in self._zonas_pc:
+                zona.grid()
+        self._pintar_modo()
+        # Cambió el contenido: el contenedor tiene que recalcular su alto.
+        self.root.after_idle(self._ajustar_sistema)
+
+    def _pintar_modo(self):
+        for modo, b in getattr(self, "_btn_modo", {}).items():
+            activo = modo == self.modo
+            b.set_style(fill=(BLUE if activo else BG),
+                        fg=("#0c1626" if activo else DIM2),
+                        hover=(BLUE if activo else BG),
+                        borde=(None if activo else BORDE))
+
+    def _construir_torniquete(self):
+        """Vista grande: los datos a la izquierda, la luz a la derecha (40%).
+
+        Es la pantalla que ve quien está pasando, en un monitor de 800 a 1024
+        px. Solo lo indispensable: si puede pasar, quién es, y si el sistema
+        está en línea.
+        """
+        v = tk.Frame(self._sistema, bg=BG)
+        v.grid(row=1, column=0, rowspan=3, sticky="nsew", padx=26, pady=(2, 8))
+        v.grid_rowconfigure(0, weight=1)
+        # `uniform` es lo que hace que la proporción se cumpla de verdad: los
+        # pesos por sí solos reparten el espacio SOBRANTE, y como el bloque de
+        # datos pide bastante ancho, la luz terminaba en un 30%.
+        v.grid_columnconfigure(0, weight=6, uniform="torniquete")   # datos
+        v.grid_columnconfigure(1, weight=4, uniform="torniquete")   # luz: 40%
+        self._vista_torniquete = v
+
+        # --- Izquierda: estado, quién pasa y el último acceso ---
+        izq = tk.Frame(v, bg=BG)
+        izq.grid(row=0, column=0, sticky="nsew", padx=(0, 20))
+        izq.grid_rowconfigure(0, weight=1)
+        izq.grid_columnconfigure(0, weight=1)
+
+        actual = tk.Frame(izq, bg=BG)
+        actual.grid(row=0, column=0, sticky="nsew")
+        self.t_banner = tk.Label(actual, text=ESPERA_TITULO, font=F(24, True),
+                                 fg=GREEN, bg=BG, justify="left", anchor="w")
+        self.t_banner.pack(anchor="w", fill="x")
+        self.t_sub = tk.Label(actual, text=ESPERA_AYUDA, font=F(15), fg=DIM,
+                              bg=BG, justify="left", anchor="w")
+        self.t_sub.pack(anchor="w", fill="x", pady=(6, 0))
+        self.t_nombre = tk.Label(actual, text="", font=F(34, True), fg=TXT,
+                                 bg=BG, justify="left", anchor="w")
+        self.t_nombre.pack(anchor="w", fill="x", pady=(8, 0))
+        self.t_cedula = tk.Label(actual, text="", font=F(19), fg=DIM, bg=BG,
+                                 anchor="w")
+        self.t_cedula.pack(anchor="w", fill="x", pady=(4, 0))
+
+        fila = tk.Frame(actual, bg=BG)
+        fila.pack(anchor="w", pady=(10, 0))
+        # Se crean pero no se muestran: una píldora vacía se ve como un botón
+        # suelto. Aparecen recién cuando hay un evento que mostrar.
+        self.t_sentido = widgets.make_pill(fila, "", GREEN, "#0c1626", BG,
+                                           F(15, True), padx=16, pady=5,
+                                           r=RADIO_PASTILLA)
+        self.t_hora = tk.Label(fila, text="", font=F(15), fg=DIM2, bg=BG)
+        self.t_hora.pack(side="left")
+
+        # --- Abajo: el último acceso y el estado de los servicios ---
+        pie = tk.Frame(izq, bg=BG)
+        pie.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        tk.Label(pie, text="ÚLTIMO ACCESO", font=F(10, True), fg=DIM2, bg=BG,
+                 anchor="w").pack(anchor="w")
+        self.t_ult_nombre = tk.Label(pie, text="—", font=F(18, True), fg=DIM,
+                                     bg=BG, anchor="w")
+        self.t_ult_nombre.pack(anchor="w", fill="x", pady=(4, 0))
+        fila_ult = tk.Frame(pie, bg=BG)
+        fila_ult.pack(anchor="w", pady=(4, 0))
+        self.t_ult_cedula = tk.Label(fila_ult, text="", font=F(12), fg=DIM2, bg=BG)
+        self.t_ult_cedula.pack(side="left", padx=(0, 14))
+        self.t_ult_sentido = widgets.make_pill(fila_ult, "", CARD_BD, TXT, BG,
+                                               F(11, True), padx=12, pady=4,
+                                               r=RADIO_PASTILLA)
+        # El resultado del acceso guardado, con su color: de un vistazo se sabe
+        # si la última persona pasó o quedó fuera, sin leer nada. También nace
+        # oculto: al arrancar todavía no pasó nadie.
+        self.t_ult_veredicto = widgets.make_pill(fila_ult, "", CARD_BD, TXT, BG,
+                                                 F(11, True), padx=12, pady=4,
+                                                 r=RADIO_PASTILLA)
+        self.t_ult_hora = tk.Label(fila_ult, text="", font=F(12), fg=DIM2, bg=BG)
+        self.t_ult_hora.pack(side="left")
+
+        # Estado de los servicios: si el sistema no puede validar, quien está
+        # frente al torniquete merece saberlo antes de apoyar la cédula.
+        estado = tk.Frame(izq, bg=BG)
+        estado.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.t_luz_bakelite = self._crear_punto(estado, "amarillo", tam=11)
+        self.t_luz_bakelite.pack(side="left", padx=(0, 7))
+        self.t_srv_bakelite = tk.Label(estado, text="Bakelite: verificando…",
+                                       font=F(11), fg=DIM, bg=BG)
+        self.t_srv_bakelite.pack(side="left", padx=(0, 22))
+        self.t_luz_externa = self._crear_punto(estado, "amarillo", tam=11)
+        self.t_luz_externa.pack(side="left", padx=(0, 7))
+        self.t_srv_externa = tk.Label(estado, text="API externa: verificando…",
+                                      font=F(11), fg=DIM, bg=BG)
+        self.t_srv_externa.pack(side="left")
+
+        # --- Derecha: la luz con degradado, como en modo PC ---
+        der = tk.Frame(v, bg=BG)
+        der.grid(row=0, column=1, sticky="nsew")
+        # Mínimo chico: la luz crece con el espacio disponible, pero no debe
+        # empujar la vista más allá de la pantalla en un monitor de 600 px.
+        self.t_luz = tk.Canvas(der, bg=BG, highlightthickness=0,
+                               width=160, height=160)
+        self.t_luz.pack(fill="both", expand=True)
+        self._t_img_luz = None
+        self._t_item_luz = None
+        self._t_lado = 0
+        self._t_color = "off"
+
+        def redibujar(evento):
+            lado = max(min(evento.width, evento.height) - 12, 90)
+            self._t_dibujar_luz(lado, evento.width, evento.height)
+
+        self.t_luz.bind("<Configure>", redibujar)
+
+        self.t_estado = tk.Label(der, text=LUCES["off"][1], font=F(22, True),
+                                 fg=DIM, bg=BG)
+        self.t_estado.pack(pady=(0, 4))
+
+        # Tamaños de referencia de cada texto, sobre una pantalla de 1024x600.
+        # Se reescalan con el tamaño real: en un monitor grande la letra crece,
+        # que es lo que hace que se lea desde lejos.
+        self._t_fuentes = (
+            (self.t_banner, 24, True), (self.t_sub, 15, False),
+            (self.t_nombre, 34, True), (self.t_cedula, 19, False),
+            (self.t_hora, 15, False),
+            (self.t_ult_nombre, 18, True), (self.t_ult_cedula, 12, False),
+            (self.t_ult_hora, 12, False),
+            (self.t_srv_bakelite, 11, False), (self.t_srv_externa, 11, False),
+        )
+
+        def ajustar(evento):
+            margen = max(int(evento.width * 0.58), 220)
+            for w in (self.t_banner, self.t_sub, self.t_nombre, self.t_ult_nombre):
+                w.config(wraplength=margen)
+            escala = self._escala_torniquete(evento.width, evento.height)
+            if abs(escala - self._t_escala) < 0.04:
+                return                      # cambio insignificante: no repinta
+            self._t_escala = escala
+            for widget, base, negrita in self._t_fuentes:
+                widget.config(font=(FAM, max(int(base * escala), 8),
+                                    "bold" if negrita else "normal"))
+            self._t_pintar_veredicto()
+            # Las píldoras son imágenes: cambiar la fuente no las redimensiona,
+            # hay que volver a generarlas con el tamaño nuevo.
+            if self._t_ultimo:
+                self._t_pintar_ultimo(self._t_ultimo)
+
+        v.bind("<Configure>", ajustar)
+        self._t_limpiar()
+
+    @staticmethod
+    def _escala_torniquete(ancho, alto):
+        """Factor de tamaño de letra según el espacio real de la vista.
+
+        La referencia es 1024x600 —la pantalla típica del torniquete—: ahí el
+        factor es 1. En un monitor grande crece y en uno chico se achica, con
+        topes para que no quede ilegible ni desbordado.
+        """
+        factor = min(ancho / 980.0, alto / 560.0)
+        return max(0.72, min(2.2, round(factor, 2)))
+
+    # ---- La luz ----
+    def _t_dibujar_luz(self, lado, ancho, alto):
+        """Redibuja la luz al tamaño disponible, con degradado hacia afuera."""
+        self._t_lado = lado
+        img = self._imagen_luz(self._t_color, lado)
+        self.t_luz.delete("luz")
+        if img is None:
+            # Sin Pillow: círculo plano, mejor eso que nada.
+            c, _e, _s = LUCES.get(self._t_color, LUCES["off"])
+            apagada = self._t_color == "off"
+            self.t_luz.create_oval(ancho / 2 - lado / 2, alto / 2 - lado / 2,
+                                   ancho / 2 + lado / 2, alto / 2 + lado / 2,
+                                   fill=(CARD if apagada else c),
+                                   outline=(CARD_BD if apagada else c), width=3,
+                                   tags="luz")
+            return
+        self._t_img_luz = img          # se guarda: Tk no retiene la imagen
+        self.t_luz.create_image(ancho / 2, alto / 2, image=img, tags="luz")
+
+    def _imagen_luz(self, color, lado):
+        """Halo radial: el núcleo sólido y la caída suave hacia el borde.
+
+        El modo PC usa dos elipses (núcleo + halo) sobre una imagen fija de
+        150 px. Aquí la luz cambia de tamaño con la ventana, así que se genera
+        a demanda y con más pasos, que es lo que da el degradado parejo.
+        """
+        clave = (color, lado)
+        cache = self._cache_luz
+        if clave in cache:
+            return cache[clave]
+        try:
+            from PIL import Image, ImageDraw
+        except Exception:  # noqa: BLE001
+            cache[clave] = None
+            return None
+        try:
+            hexa = CARD if color == "off" else LUCES.get(color, LUCES["off"])[0]
+            r, g, b = (int(hexa.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+            S = 2
+            D = lado * S
+            img = Image.new("RGBA", (D, D), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(img)
+            pasos = 120
+            nucleo = 0.42          # hasta aquí, color pleno
+            alfa_halo = 0.60 if color != "off" else 0.35
+            # De afuera hacia adentro: cada anillo pisa al anterior, y la
+            # secuencia de alfas crecientes deja el degradado.
+            for i in range(pasos, 0, -1):
+                f = i / pasos
+                if f <= nucleo:
+                    a = 255
+                else:
+                    t = (f - nucleo) / (1 - nucleo)
+                    a = int(255 * alfa_halo * (1 - t) ** 2.4)
+                if a <= 0:
+                    continue
+                radio = (D / 2) * f
+                dr.ellipse([D / 2 - radio, D / 2 - radio,
+                            D / 2 + radio, D / 2 + radio], fill=(r, g, b, a))
+            foto = self._png_desde_pil(img.resize((lado, lado), Image.LANCZOS))
+        except Exception as e:  # noqa: BLE001
+            log.error("No se pudo generar la luz del torniquete: %s", e)
+            foto = None
+        cache[clave] = foto
+        return foto
+
+    def _texto_brillante(self, texto, color, tam):
+        """El veredicto como imagen con halo: se lee desde lejos.
+
+        Un Label normal se pierde contra el fondo oscuro a varios metros. Aquí
+        el texto se dibuja dos veces —una desenfocada detrás, a modo de
+        resplandor, y otra nítida encima—, que es lo que le da el brillo.
+        """
+        clave = (texto, color, tam)
+        if clave in self._cache_brillo:
+            return self._cache_brillo[clave]
+        try:
+            from PIL import Image, ImageDraw, ImageFont, ImageFilter
+            fuente = ImageFont.truetype(FUENTE_TTF, tam)
+            r, g, b = (int(color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+            margen = int(tam * 0.9)
+            caja = ImageDraw.Draw(Image.new("RGBA", (1, 1))).textbbox(
+                (0, 0), texto, font=fuente)
+            ancho = caja[2] - caja[0] + margen * 2
+            alto = caja[3] - caja[1] + margen * 2
+            img = Image.new("RGBA", (ancho, alto), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(img)
+            pos = (margen - caja[0], margen - caja[1])
+            dr.text(pos, texto, font=fuente, fill=(r, g, b, 190))
+            halo = img.filter(ImageFilter.GaussianBlur(tam * 0.28))
+            # El halo se refuerza para que el resplandor tenga cuerpo.
+            halo = Image.alpha_composite(halo, halo)
+            dr2 = ImageDraw.Draw(halo)
+            dr2.text(pos, texto, font=fuente, fill=(r, g, b, 255))
+            foto = self._png_desde_pil(halo)
+        except Exception as e:  # noqa: BLE001
+            log.error("No se pudo generar el texto brillante: %s", e)
+            foto = None
+        self._cache_brillo[clave] = foto
+        return foto
+
+    def _t_pintar_veredicto(self):
+        """Redibuja el veredicto con el tamaño y color que correspondan."""
+        c, etq, _sig = LUCES.get(self._t_color, LUCES["off"])
+        color = DIM if self._t_color == "off" else c
+        tam = max(int(self._t_escala * 30), 14)
+        img = self._texto_brillante(etq, color, tam)
+        if img is None:
+            self.t_estado.config(image="", text=etq, fg=color,
+                                 font=(FAM, tam, "bold"))
+            return
+        self._t_img_estado = img          # Tk no retiene la imagen
+        self.t_estado.config(image=img, text="")
+
+    def _t_pintar_luz(self, color):
+        self._t_color = color
+        self._t_pintar_veredicto()
+        if self._t_lado:
+            self._t_dibujar_luz(self._t_lado, self.t_luz.winfo_width(),
+                                self.t_luz.winfo_height())
+
+    # ---- Contenido ----
+    def _sincronizar_torniquete(self):
+        """Al entrar al modo, refleja lo que la pantalla ya venía mostrando."""
+        if self._vista_torniquete is None:
+            return
+        self.t_banner.config(text=self.lbl_estado.cget("text"),
+                             fg=self.lbl_estado.cget("fg"))
+        if self._t_ultimo:
+            self._t_pintar_ultimo(self._t_ultimo)
+        elif self.historial:
+            self._t_pintar_ultimo(self.historial[0])
+        for servicio in ("bakelite", "externa"):
+            datos = self._estado_servicios.get(servicio)
+            if datos:
+                self._t_servicio(servicio, *datos)
+
+    def _t_resultado(self, r):
+        """Quién está pasando, en grande; y abajo, ese mismo acceso como el
+        último registrado. Cuando la pantalla vuelva a "en espera", abajo queda
+        quien acaba de pasar."""
+        nombre = (r.nombre or "").strip() or "—"
+        entrada = r.sentido == "E"
+        hora = datetime.datetime.now().strftime("%H:%M:%S")
+        self.t_sub.config(text="")
+        self.t_nombre.config(text=nombre)
+        self.t_cedula.config(text=(f"Cédula: {r.rut_display}" if r.rut_display else ""))
+        widgets.set_pill(self.t_sentido, "ENTRADA" if entrada else "SALIDA",
+                         GREEN if entrada else BLUE, "#0c1626", BG,
+                         self._t_fuente(15, True), padx=16, pady=5,
+                         r=RADIO_PASTILLA)
+        if not self.t_sentido.winfo_ismapped():
+            self.t_sentido.pack(side="left", padx=(0, 14), before=self.t_hora)
+        self.t_hora.config(text=hora)
+
+        # Solo los accesos de una persona identificada pasan al pie: un error
+        # de lectura no reemplaza a quien sí pasó.
+        if r.codigo in (0, 1):
+            self._t_pintar_ultimo({"nombre": nombre, "rut": r.rut_display,
+                                   "sentido": "ENTRADA" if entrada else "SALIDA",
+                                   "hora": hora, "codigo": r.codigo})
+
+    def _t_pintar_ultimo(self, datos):
+        self._t_ultimo = datos
+        self.t_ult_nombre.config(text=datos.get("nombre") or "—")
+        self.t_ult_cedula.config(text=datos.get("rut") or datos.get("rut_display") or "")
+        self.t_ult_hora.config(text=datos.get("hora") or "")
+
+        entrada = datos.get("sentido") == "ENTRADA"
+        fuente = self._t_fuente(11, True)
+        widgets.set_pill(self.t_ult_sentido, datos.get("sentido") or "",
+                         GREEN if entrada else BLUE, "#0c1626", BG, fuente,
+                         padx=12, pady=4, r=RADIO_PASTILLA)
+        if not self.t_ult_sentido.winfo_ismapped():
+            self.t_ult_sentido.pack(side="left", padx=(0, 10),
+                                    before=self.t_ult_hora)
+        # El color del veredicto es el mismo que tuvo la luz: verde si pasó,
+        # rojo si quedó fuera, amarillo si no se pudo saber.
+        texto, color = VEREDICTO.get(datos.get("codigo"), ("", CARD_BD))
+        if texto:
+            widgets.set_pill(self.t_ult_veredicto, texto, color, "#0c1626", BG,
+                             fuente, padx=12, pady=4, r=RADIO_PASTILLA)
+            if not self.t_ult_veredicto.winfo_ismapped():
+                self.t_ult_veredicto.pack(side="left", padx=(0, 14),
+                                          before=self.t_ult_hora)
+        else:
+            self.t_ult_veredicto.pack_forget()
+
+    def _t_fuente(self, base, negrita=False):
+        """Tamaño ya escalado, para las píldoras que se dibujan como imagen."""
+        return (FAM, max(int(base * self._t_escala), 8),
+                "bold" if negrita else "normal")
+
+    def _t_limpiar(self):
+        """Vuelve al mensaje de espera sin borrar el último acceso."""
+        self.t_banner.config(text=ESPERA_TITULO, fg=GREEN)
+        self.t_sub.config(text=ESPERA_AYUDA, fg=DIM)
+        self.t_nombre.config(text="")
+        self.t_cedula.config(text="")
+        # Se oculta, no se vacía: una píldora sin texto igual dibuja su fondo
+        # redondeado y queda como un botón vacío en medio de la pantalla.
+        self.t_sentido.pack_forget()
+        self.t_hora.config(text="")
+
+    def _t_servicio(self, servicio, en_linea, texto):
+        if self._vista_torniquete is None or not hasattr(self, "t_srv_bakelite"):
+            return
+        if servicio == "externa":
+            punto, lbl = self.t_luz_externa, self.t_srv_externa
+        else:
+            punto, lbl = self.t_luz_bakelite, self.t_srv_bakelite
+        color = "amarillo" if en_linea is None else ("verde" if en_linea else "rojo")
+        self._pintar_punto(punto, color)
+        lbl.config(text=texto, fg=(DIM if en_linea is not False else RED))
+
+    # ================= Modo debugger =================
+    def alternar_debugger(self):
+        """Pide confirmación antes de partir la pantalla en dos."""
+        if self.debug_activo:
+            self.activar_debugger(False)
+            return
+        self._confirmar(
+            "Entrar en modo debugger",
+            "La pantalla se divide en dos: a la izquierda la aplicación, a la "
+            "derecha el registro paso a paso de lo que se hace y lo que se "
+            "recibe.\n\nEl registro se guarda en el equipo y se conserva al "
+            "salir, así se puede revisar después.",
+            "Entrar", lambda: self.activar_debugger(True))
+
+    def _confirmar(self, titulo, texto, etiqueta_ok, al_aceptar):
+        """Diálogo de confirmación propio: los de tkinter usan el tema del
+        sistema y no pegan con el resto."""
+        # Se cuelga de la ventana que esté arriba: si la confirmación nace del
+        # diálogo de Ajustes y se hace transient de la raíz, queda por debajo.
+        padre = self.root
+        if self._dlg is not None and tk.Toplevel.winfo_exists(self._dlg):
+            padre = self._dlg
+
+        dlg = tk.Toplevel(padre, bg=BG)
+        dlg.title(titulo)
+        dlg.transient(padre)
+        dlg.resizable(False, False)
+
+        tk.Label(dlg, text=titulo.upper(), font=F(14, True), fg=TXT, bg=BG)\
+            .pack(anchor="w", padx=26, pady=(22, 8))
+        tk.Label(dlg, text=texto, font=F(10), fg=DIM, bg=BG, wraplength=460,
+                 justify="left").pack(anchor="w", padx=26)
+
+        botones = tk.Frame(dlg, bg=BG)
+        botones.pack(fill="x", padx=26, pady=(20, 20))
+
+        def aceptar():
+            dlg.destroy()
+            al_aceptar()
+
+        widgets.RoundedButton(botones, etiqueta_ok, GREEN, "#0c1626", aceptar, BG,
+                              F(10, True), hover="#54e08f", r=12, padx=20, pady=9,
+                              ancho=self.ANCHO_BOTON).pack(side="right")
+        widgets.RoundedButton(botones, "Cancelar", BG, TXT, dlg.destroy, BG,
+                              F(10, True), hover=BG, r=12, padx=20, pady=9,
+                              ancho=self.ANCHO_BOTON, borde=BORDE)\
+            .pack(side="right", padx=(0, 10))
+        # Recién ahora, con el contenido puesto y la ventana ya dibujada, se
+        # puede centrar y tomar el foco. grab_set() sobre una ventana que aún no
+        # es visible lanza "grab failed: window not viewable", y esa excepción
+        # dejaba el diálogo a medio construir: por eso salía vacío.
+        dlg.update_idletasks()
+        x = padre.winfo_rootx() + (padre.winfo_width() - dlg.winfo_width()) // 2
+        y = padre.winfo_rooty() + max((padre.winfo_height() - dlg.winfo_height()) // 3, 40)
+        dlg.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        dlg.lift()
+        dlg.attributes("-topmost", True)
+
+        def tomar_foco():
+            try:
+                dlg.grab_set()
+                dlg.focus_force()
+            except tk.TclError as e:      # la ventana se cerró mientras tanto
+                log.debug("No se pudo tomar el foco del diálogo: %s", e)
+
+        dlg.after(60, tomar_foco)
+
+    def activar_debugger(self, activo):
+        if activo == self.debug_activo:
+            return
+        self.debug_activo = activo
+        if activo:
+            self._crear_panel_debug()
+            depurador.suscribir(self._debug_entrante)
+            depurador.activo = True
+            depurador.accion("Modo debugger activado", origen="interfaz")
+        else:
+            depurador.accion("Modo debugger desactivado", origen="interfaz")
+            depurador.activo = False
+            depurador.desuscribir(self._debug_entrante)
+            if self._panel_debug is not None:
+                self._panel_debug.destroy()
+                self._panel_debug = None
+                self._texto_debug = None
+            self.root.grid_columnconfigure(1, weight=0, minsize=0)
+
+    def _crear_panel_debug(self):
+        # La mitad derecha: mismo peso que la aplicación, con un mínimo para
+        # que el registro siga siendo legible en pantallas chicas.
+        self.root.grid_columnconfigure(1, weight=1, minsize=420)
+        panel = tk.Frame(self.root, bg=BG, padx=18, pady=14)
+        panel.grid(row=0, column=1, sticky="nsew")
+        panel.grid_rowconfigure(2, weight=1)
+        panel.grid_columnconfigure(0, weight=1)
+        self._panel_debug = panel
+
+        cab = tk.Frame(panel, bg=BG)
+        cab.grid(row=0, column=0, sticky="ew")
+        tk.Label(cab, text="🐞  MODO DEBUGGER", font=F(13, True), fg=TXT, bg=BG)\
+            .pack(side="left")
+        widgets.RoundedButton(cab, "Salir", BG, TXT,
+                              lambda: self.activar_debugger(False), BG, F(10, True),
+                              hover=BG, r=10, padx=14, pady=6, ancho=96,
+                              borde=BORDE)\
+            .pack(side="right")
+        widgets.RoundedButton(cab, "Limpiar", BG, DIM, self._debug_limpiar, BG,
+                              F(10, True), hover=BG, r=10, padx=14, pady=6,
+                              ancho=96, borde=BORDE).pack(side="right", padx=(0, 8))
+
+        tk.Label(panel, text=f"→ lo que se hace    ← lo que se recibe    ·  detalle\n"
+                             f"{depurador.ruta}",
+                 font=F(8), fg=DIM2, bg=BG, justify="left")\
+            .grid(row=1, column=0, sticky="w", pady=(4, 8))
+
+        caja = tk.Frame(panel, bg=BG)
+        caja.grid(row=2, column=0, sticky="nsew")
+        barra = tk.Scrollbar(caja, orient="vertical", bg=CARD_BD, troughcolor=BG,
+                             activebackground=DIM2, highlightthickness=0,
+                             borderwidth=0, relief="flat", width=10)
+        barra.pack(side="right", fill="y")
+        texto = tk.Text(caja, bg=CARD, fg=TXT, insertbackground=TXT, relief="flat",
+                        font=("DejaVu Sans Mono", 9), wrap="word", padx=12, pady=10,
+                        yscrollcommand=barra.set, highlightthickness=0)
+        texto.pack(side="left", fill="both", expand=True)
+        barra.config(command=texto.yview)
+        texto.tag_configure("accion", foreground=BLUE)
+        texto.tag_configure("respuesta", foreground=GREEN)
+        texto.tag_configure("error", foreground=RED)
+        texto.tag_configure("info", foreground=DIM2)
+        self._texto_debug = texto
+
+        # Lo que ya estaba registrado: el modo debugger sirve justo para
+        # revisar lo que pasó antes de abrirlo.
+        for linea in depurador.historial():
+            self._debug_escribir(linea)
+        texto.config(state="disabled")
+
+    def _debug_entrante(self, linea):
+        """Llega desde cualquier hilo: se pasa por la cola de Tk."""
+        self.cola.put(lambda: self._debug_agregar(linea))
+
+    def _debug_agregar(self, linea):
+        if self._texto_debug is None:
+            return
+        self._texto_debug.config(state="normal")
+        self._debug_escribir(linea)
+        self._texto_debug.config(state="disabled")
+        self._texto_debug.see("end")
+
+    def _debug_escribir(self, linea):
+        if "ERROR" in linea:
+            tag = "error"
+        elif "  →  " in linea:
+            tag = "accion"
+        elif "  ←  " in linea:
+            tag = "respuesta"
+        else:
+            tag = "info"
+        self._texto_debug.insert("end", linea + "\n", tag)
+
+    def _debug_limpiar(self):
+        depurador.limpiar()
+        if self._texto_debug is not None:
+            self._texto_debug.config(state="normal")
+            self._texto_debug.delete("1.0", "end")
+            self._texto_debug.config(state="disabled")
+        depurador.accion("Registro limpiado", origen="interfaz")
+
     def _barra_superior(self):
-        top = tk.Frame(self.root, bg=BG)
+        top = tk.Frame(self._sistema, bg=BG)
         top.grid(row=0, column=0, sticky="ew", padx=44, pady=(24, 0))
         top.grid_columnconfigure(0, weight=1)
 
@@ -185,6 +894,20 @@ class Interfaz:
         self.lbl_fecha = tk.Label(right, text="", font=F(12), fg=DIM, bg=BG)
         self.lbl_fecha.pack(anchor="e")
 
+        # Selector de modo. En el torniquete la pantalla es chica y quien pasa
+        # solo necesita ver si puede pasar; toda la operación (historial,
+        # aforo, ajustes) es del modo PC.
+        sel = tk.Frame(right, bg=BG)
+        sel.pack(anchor="e", pady=(8, 0))
+        self._btn_modo = {}
+        for modo, texto in (("torniquete", "TORNIQUETE"), ("pc", "PC")):
+            b = widgets.RoundedButton(sel, texto, BG, DIM2, None, BG, F(9, True),
+                                      r=9, padx=12, pady=5, ancho=104, borde=BORDE)
+            b._command = lambda m=modo: self.set_modo(m)
+            b.pack(side="left", padx=(6, 0))
+            self._btn_modo[modo] = b
+        self._pintar_modo()
+
     def _logo(self, parent):
         import math
         c = tk.Canvas(parent, width=40, height=40, bg=BG, highlightthickness=0)
@@ -200,7 +923,7 @@ class Interfaz:
         c.pack(side="left", padx=(0, 12))
 
     def _banner(self):
-        cont = tk.Frame(self.root, bg=BG)
+        cont = tk.Frame(self._sistema, bg=BG)
         cont.grid(row=1, column=0, pady=(20, 0))
 
         self._banner_cont = cont
@@ -226,7 +949,7 @@ class Interfaz:
         self.lbl_aviso.bind("<Button-1>", lambda e: self._abrir_estado())
 
     def _centro(self):
-        centro = tk.Frame(self.root, bg=BG)
+        centro = tk.Frame(self._sistema, bg=BG)
         centro.grid(row=2, column=0)
         self._panel_luz(centro)                       # columna izquierda
         der = tk.Frame(centro, bg=BG)
@@ -313,7 +1036,7 @@ class Interfaz:
 
     def _powered_by(self):
         """Firma centrada al pie de la ventana, en su propia fila."""
-        barra = tk.Frame(self.root, bg=BG)
+        barra = tk.Frame(self._sistema, bg=BG)
         barra.grid(row=5, column=0, pady=(2, 14))
         tk.Label(barra, text="Powered by", font=F(9), fg=DIM2, bg=BG)\
             .pack(side="left", padx=(0, 9))
@@ -323,7 +1046,7 @@ class Interfaz:
             tk.Label(barra, text="sopytec", font=F(12, True), fg=TXT, bg=BG).pack(side="left")
 
     def _pie(self):
-        foot = tk.Frame(self.root, bg=BG)
+        foot = tk.Frame(self._sistema, bg=BG)
         foot.grid(row=3, column=0, sticky="ew", padx=44, pady=(0, 16))
         foot.grid_columnconfigure(0, weight=1)
 
@@ -338,12 +1061,18 @@ class Interfaz:
 
         der = tk.Frame(foot, bg=BG)
         der.grid(row=0, column=1, sticky="e")
-        widgets.RoundedButton(der, "🔌  Estado", CARD, DIM, self._abrir_estado, BG,
-                              F(10, True), hover=CARD_BD, r=10, padx=12, pady=5)\
-            .pack(side="left", padx=(0, 8))
-        widgets.RoundedButton(der, "⚙  Ajustes", CARD, DIM, self._abrir_ajustes, BG,
-                              F(10, True), hover=CARD_BD, r=10, padx=12, pady=5)\
-            .pack(side="left", padx=(0, 16))
+        # Cuatro accesos, cada uno abre solo lo suyo. Antes «Ajustes» era una
+        # sola ventana con todo adentro y había que buscar la sección.
+        accesos = (("🔌  Estado", self._abrir_estado),
+                   ("🖥  Terminal", lambda: self._abrir_ajustes("terminal")),
+                   ("⚙  Ajustes", lambda: self._abrir_ajustes("ajustes")),
+                   ("▶  Pruebas", lambda: self._abrir_ajustes("pruebas")))
+        for texto, accion in accesos:
+            widgets.RoundedButton(der, texto, CARD, DIM, accion, BG,
+                                  F(10, True), hover=CARD_BD, r=10, padx=12,
+                                  pady=5, ancho=118)\
+                .pack(side="left", padx=(0, 8))
+        tk.Frame(der, bg=BG, width=8).pack(side="left")
         # Estado en línea: luz + texto + última conexión
         self.luz_online = self._crear_punto(der)
         self.luz_online.pack(side="left", padx=(0, 7))
@@ -388,6 +1117,28 @@ class Interfaz:
     def mostrar_critico(self, texto):
         self.cola.put(lambda: self._mostrar_critico(texto))
 
+    def limpiar_critico(self):
+        self.cola.put(self._limpiar_critico)
+
+    def recargar_dispositivos(self):
+        """Bakelite cambió la configuración: se relee y se repinta. Llega desde
+        el hilo de sincronización, así que pasa por la cola de Tk."""
+        self.cola.put(self._ui_recargar_dispositivos)
+
+    def _ui_recargar_dispositivos(self):
+        aj = getattr(self.controlador, "ajustes", None) if self.controlador else None
+        if aj is not None:
+            aj.cargar_de_bd()
+        # El aviso de arriba nombra las lectoras por su sentido: si cambió, ahí
+        # también tiene que cambiar.
+        self._aplicar_estado(self.estado_hw)
+        refrescar = getattr(self, "_refrescar_lectoras", None)
+        if refrescar and self._dlg is not None and tk.Toplevel.winfo_exists(self._dlg):
+            try:
+                refrescar()
+            except Exception:  # noqa: BLE001
+                pass
+
     def set_nombre_terminal(self, nombre):
         """El nombre cambió en Bakelite y el sincronizador lo adoptó. Llega
         desde el hilo del sincronizador, así que pasa por la cola."""
@@ -412,9 +1163,15 @@ class Interfaz:
 
     def _ui_esperando(self):
         self._set_banner(GREEN, "ACERQUE SU CÉDULA DE IDENTIDAD AL LECTOR")
+        if self._vista_torniquete is not None:
+            self.t_banner.config(text="ACERQUE SU CÉDULA", fg=GREEN)
+            self._t_limpiar()
 
     def _ui_consultando(self, sentido):
         self._set_banner(BLUE, "VALIDANDO ACCESO…")
+        if self._vista_torniquete is not None:
+            self.t_banner.config(text="VALIDANDO…", fg=BLUE)
+            self._t_limpiar()
 
     def _ui_resultado(self, r):
         codigo = r.codigo
@@ -425,6 +1182,11 @@ class Interfaz:
         elif codigo == 4:
             self._set_banner(YELLOW, "SIN CONEXIÓN A RED")
             self._veredicto("warn", "SIN RED", YELLOW)
+        elif codigo == 5:
+            # La consulta se pasó del tope: no se sabe si la persona puede
+            # pasar, así que se le pide que lo intente de nuevo.
+            self._set_banner(YELLOW, "SIN RESPUESTA — VUELVA A INTENTAR")
+            self._veredicto("warn", "REINTENTE", YELLOW)
         elif codigo in (2, 3):
             self._set_banner(RED, "ERROR DE LECTURA — REINTENTE")
             self._veredicto("no", "ERROR", RED)
@@ -435,11 +1197,18 @@ class Interfaz:
         if codigo in (0, 1):
             self._push_historial(r)
 
+        if self._vista_torniquete is not None:
+            self.t_banner.config(text=self.lbl_estado.cget("text"),
+                                 fg=self.lbl_estado.cget("fg"))
+            self._t_resultado(r)
+
     def _ui_luz(self, color):
         c, etq, _sig = LUCES.get(color, LUCES["off"])
         if self._luz_ok:
             self.luz_big.config(image=self._luz_img[color])
         self.luz_cap.config(text=etq, fg=c)
+        if self._vista_torniquete is not None:
+            self._t_pintar_luz(color)
 
     def _ui_en_linea(self, en_linea, ultima, servicio="bakelite"):
         if servicio == "externa":
@@ -454,6 +1223,8 @@ class Interfaz:
             if ultima:
                 txt += f"  ·  última conexión {self._hace_cuanto(ultima)}"
             lbl.config(text=txt, fg=DIM)
+            self._estado_servicios[servicio] = (None, txt)
+            self._t_servicio(servicio, None, txt)
             return
 
         self._pintar_punto(luz, "verde" if en_linea else "rojo")
@@ -470,6 +1241,8 @@ class Interfaz:
             except Exception:  # noqa: BLE001
                 pass
         lbl.config(text=txt, fg=DIM if en_linea else RED)
+        self._estado_servicios[servicio] = (en_linea, txt)
+        self._t_servicio(servicio, en_linea, txt)
 
     @staticmethod
     def _hace_cuanto(dt):
@@ -634,13 +1407,26 @@ class Interfaz:
                 f["fila"].pack(fill="x", pady=3, ipady=7)
 
     # ================= estado de conexión del hardware =================
+    def _sentido_lectora(self, numero):
+        """ENTRADA o SALIDA según la configuración vigente, no según el config.py.
+        Antes estaba escrito a mano en cada texto y quedaba mintiendo apenas el
+        operador cambiaba el sentido en Ajustes."""
+        aj = getattr(self.controlador, "ajustes", None) if self.controlador else None
+        if aj is None:
+            nominal = config.SENTIDO_LECTORA1 if numero == 1 else config.SENTIDO_LECTORA2
+            return "entrada" if nominal == "E" else "salida"
+        return "entrada" if aj.sentido_lectora(numero) == "E" else "salida"
+
+    def _puerto_lectora(self, numero):
+        """Puerto real de ahora mismo, o None si está desconectada."""
+        return (self.estado_hw.get("puertos") or {}).get(f"lectora{numero}")
+
     def _aplicar_estado(self, estado):
         self.estado_hw = dict(estado)
         faltan = []
-        if not estado.get("lectora1"):
-            faltan.append("Lectora 1 (entrada)")
-        if not estado.get("lectora2"):
-            faltan.append("Lectora 2 (salida)")
+        for n in (1, 2):
+            if not estado.get(f"lectora{n}"):
+                faltan.append(f"Lectora {n} ({self._sentido_lectora(n)})")
         if not estado.get("arduino"):
             faltan.append("Arduino (relés/luces)")
         if faltan:
@@ -650,6 +1436,13 @@ class Interfaz:
             self.lbl_aviso.config(text="")
         if self._dlg_estado is not None and tk.Toplevel.winfo_exists(self._dlg_estado):
             self._render_estado_items()
+        # Si Ajustes está abierto, sus filas también reflejan el cambio al vuelo.
+        refrescar = getattr(self, "_refrescar_lectoras", None)
+        if refrescar and self._dlg is not None and tk.Toplevel.winfo_exists(self._dlg):
+            try:
+                refrescar()
+            except Exception:  # noqa: BLE001  el diálogo pudo cerrarse mientras tanto
+                pass
 
     def _abrir_estado(self):
         if self._dlg_estado is not None and tk.Toplevel.winfo_exists(self._dlg_estado):
@@ -672,9 +1465,10 @@ class Interfaz:
         widgets.RoundedButton(botones, "⟳  Volver a detectar", GREEN, "#0c1626",
                               self._redetectar, BG, F(10, True), hover="#54e08f",
                               r=12, padx=16, pady=8).pack(side="left", padx=8)
-        widgets.RoundedButton(botones, "Cerrar", CARD_BD, TXT, dlg.destroy, BG,
-                              F(10, True), hover="#38507a",
-                              r=12, padx=18, pady=8).pack(side="left", padx=8)
+        widgets.RoundedButton(botones, "Cerrar", BG, TXT, dlg.destroy, BG,
+                              F(10, True), hover=BG, r=12, padx=18, pady=8,
+                              ancho=self.ANCHO_BOTON, borde=BORDE)\
+            .pack(side="left", padx=8)
         self._render_estado_items()
 
     def _render_estado_items(self):
@@ -682,23 +1476,26 @@ class Interfaz:
         for w in cont.winfo_children():
             w.destroy()
         items = [
-            ("Lectora 1", "Entrada · lee la cédula", self.estado_hw.get("lectora1")),
-            ("Lectora 2", "Salida · lee la cédula", self.estado_hw.get("lectora2")),
-            ("Arduino", "Relés + luces del semáforo", self.estado_hw.get("arduino")),
+            (f"Lectora {n}",
+             f"{self._sentido_lectora(n).capitalize()} · "
+             f"{self._puerto_lectora(n) or 'sin puerto'}",
+             self.estado_hw.get(f"lectora{n}"))
+            for n in (1, 2)
         ]
+        items.append(("Arduino", "Relés + luces del semáforo",
+                      self.estado_hw.get("arduino")))
         for nombre, desc, ok in items:
             col = GREEN if ok else RED
-            fila = widgets.RoundedPanel(cont, 500, 56, 12, CARD, BG, pad=0)
-            fila.pack(fill="x", pady=5)
-            inner = fila.inner
-            self._crear_punto(inner, "verde" if ok else "rojo", tam=14, bg=CARD)\
-                .pack(side="left", padx=(14, 10))
-            txt = tk.Frame(inner, bg=CARD)
+            fila = tk.Frame(cont, bg=BG, pady=10)
+            fila.pack(fill="x", pady=(0, 4))
+            self._crear_punto(fila, "verde" if ok else "rojo", tam=14, bg=BG)\
+                .pack(side="left", padx=(4, 12))
+            txt = tk.Frame(fila, bg=BG)
             txt.pack(side="left")
-            tk.Label(txt, text=nombre, font=F(12, True), fg=TXT, bg=CARD).pack(anchor="w")
-            tk.Label(txt, text=desc, font=F(9), fg=DIM2, bg=CARD).pack(anchor="w")
-            tk.Label(inner, text=("CONECTADO" if ok else "NO CONECTADO"), font=F(11, True),
-                     fg=col, bg=CARD).pack(side="right", padx=16)
+            tk.Label(txt, text=nombre, font=F(12, True), fg=TXT, bg=BG).pack(anchor="w")
+            tk.Label(txt, text=desc, font=F(9), fg=DIM2, bg=BG).pack(anchor="w")
+            tk.Label(fila, text=("CONECTADO" if ok else "NO CONECTADO"),
+                     font=F(11, True), fg=col, bg=BG).pack(side="right", padx=4)
 
     def _redetectar(self):
         if not self.redetectar_cb:
@@ -715,6 +1512,23 @@ class Interfaz:
         threading.Thread(target=worker, daemon=True).start()
 
     # ================= diálogo de ajustes =================
+    def _ui_lectora_identificada(self, numero, rut, aj):
+        """Una lectora acaba de leer: se resalta su fila y se dice cuál es."""
+        sentido = "ENTRADA" if aj.sentido_lectora(numero) == "E" else "SALIDA"
+        for n, (marco, sub, pintar, lbl) in getattr(self, "_filas_lectoras", {}).items():
+            lbl.config(fg=(GREEN if n == numero else TXT))
+        if rut:
+            texto = (f"El RUT {rut} fue leído en la LECTORA {numero}, "
+                     f"configurada actualmente como {sentido}.")
+        else:
+            # Lectura ilegible: no se entendió la cédula, pero delató la lectora.
+            texto = (f"Lectura recibida en la LECTORA {numero}, configurada "
+                     f"actualmente como {sentido}. No se pudo leer el RUT.")
+        try:
+            self._lbl_ident.config(text=texto, fg=GREEN if rut else YELLOW)
+        except Exception:  # noqa: BLE001  el diálogo pudo cerrarse mientras tanto
+            pass
+
     def _refrescar_nombre_terminal(self):
         nombre = None
         if self.controlador is not None:
@@ -745,151 +1559,380 @@ class Interfaz:
         else:
             self.lbl_ubicacion.config(text="📍  Ubicación sin configurar  (⚙ Ajustes)", fg=DIM2)
 
-    def _abrir_ajustes(self):
+    # ================= Ajustes (con pestañas) =================
+    # Todos los botones del módulo comparten ancho: una fila despareja se lee
+    # como si unos botones fueran más importantes que otros.
+    ANCHO_BOTON = 132
+    # Cada sección se abre por su cuenta desde el pie: la ventana trae solo lo
+    # que se pidió, sin pestañas ni navegación interna que recorrer.
+    SECCIONES = {
+        "terminal": ("Nombre terminal", "Nombre del terminal y ubicación"),
+        "ajustes": ("Ajustes", "Lectoras y relés: cuál es entrada y cuál salida"),
+        "pruebas": ("Pruebas", "Accionar torniquetes y luces del semáforo"),
+    }
+
+    def _abrir_ajustes(self, clave="ajustes"):
         aj = getattr(self.controlador, "ajustes", None) if self.controlador else None
         if aj is None:
             return
+        # Si ya hay una sección abierta, se reemplaza: dos ventanas de
+        # configuración a la vez solo confunden.
         if self._dlg is not None and tk.Toplevel.winfo_exists(self._dlg):
-            self._dlg.lift()
-            return
+            if getattr(self, "_dlg_seccion", None) == clave:
+                self._dlg.lift()
+                return
+            self._dlg.destroy()
+
+        titulo, bajada = self.SECCIONES[clave]
+        constructor = {"terminal": self._tab_terminal,
+                       "ajustes": self._tab_dispositivos,
+                       "pruebas": self._tab_pruebas}[clave]
+
         dlg = tk.Toplevel(self.root, bg=BG)
         self._dlg = dlg
-        dlg.title("Ajustes")
+        self._dlg_seccion = clave
+        dlg.title(titulo)
         dlg.configure(bg=BG)
-        dlg.geometry("640x760")
+        dlg.geometry("760x640")
         dlg.transient(self.root)
         dlg.resizable(False, False)
 
-        tk.Label(dlg, text="AJUSTES", font=F(15, True), fg=TXT, bg=BG).pack(pady=(20, 2))
+        cab = tk.Frame(dlg, bg=BG)
+        cab.pack(fill="x", padx=26, pady=(20, 14))
+        tk.Label(cab, text=titulo.upper(), font=F(16, True), fg=TXT, bg=BG)\
+            .pack(anchor="w")
+        tk.Label(cab, text=bajada, font=F(10), fg=DIM2, bg=BG)\
+            .pack(anchor="w", pady=(2, 0))
 
-        # --- Nombre del terminal (se sincroniza con Bakelite) ---
-        tk.Label(dlg, text="Nombre del terminal:", font=F(10, True), fg=DIM, bg=BG)\
-            .pack(anchor="w", padx=30, pady=(12, 2))
-        fn = tk.Frame(dlg, bg=BG)
-        fn.pack(fill="x", padx=30)
-        entrada_nom = tk.Entry(fn, font=F(12), bg=CARD, fg=TXT, insertbackground=TXT,
-                               relief="flat", bd=8)
-        entrada_nom.pack(side="left", fill="x", expand=True, ipady=2)
-        entrada_nom.insert(0, (self.controlador.nombre_terminal() or "")
-                           if self.controlador else "")
-        self._entrada_nombre = entrada_nom
-        aviso_nom = tk.Label(dlg, text="Se sincroniza con Bakelite: gana el último cambio.",
-                             font=F(9), fg=DIM2, bg=BG)
-        aviso_nom.pack(anchor="w", padx=30, pady=(4, 0))
+        interno, contenedor = self._panel_scroll(dlg)
+        contenedor.pack(fill="both", expand=True, padx=26)
+        constructor(interno, aj)
 
-        def guardar_nombre():
-            nuevo = entrada_nom.get().strip()
+        pie = tk.Frame(dlg, bg=BG)
+        pie.pack(fill="x", padx=26, pady=(12, 18))
+        widgets.RoundedButton(pie, "Cerrar", BG, TXT, dlg.destroy, BG,
+                              F(10, True), hover=BG, r=12, padx=22, pady=9,
+                              ancho=self.ANCHO_BOTON, borde=BORDE)\
+            .pack(side="right")
+
+    def _panel_scroll(self, parent):
+        """Sección con scroll propio. Devuelve (contenido, contenedor)."""
+        contenedor = tk.Frame(parent, bg=BG)
+
+        lienzo = tk.Canvas(contenedor, bg=BG, highlightthickness=0)
+        # La barra de scroll de Tk viene gris claro de fábrica y es lo único
+        # que se sale del tema oscuro. Se pinta entera, incluido el canal.
+        barra = tk.Scrollbar(contenedor, orient="vertical", command=lienzo.yview,
+                             bg=CARD_BD, troughcolor=BG, activebackground=DIM2,
+                             highlightthickness=0, borderwidth=0, relief="flat",
+                             width=10)
+        interno = tk.Frame(lienzo, bg=BG)
+        ventana = lienzo.create_window((0, 0), window=interno, anchor="nw")
+        lienzo.configure(yscrollcommand=barra.set)
+        barra.pack(side="right", fill="y")
+        lienzo.pack(side="left", fill="both", expand=True)
+
+        def ajustar(evento=None):
+            """La barra solo se muestra si el contenido no cabe. Una barra
+            permanente sobre una sección corta es ruido: sugiere que hay algo
+            más abajo cuando no lo hay."""
+            caja = lienzo.bbox("all")
+            lienzo.configure(scrollregion=caja or (0, 0, 0, 0))
+            if evento is not None and evento.widget is lienzo:
+                lienzo.itemconfig(ventana, width=evento.width)
+            sobra = bool(caja) and caja[3] > lienzo.winfo_height()
+            if sobra and not barra.winfo_ismapped():
+                barra.pack(side="right", fill="y", before=lienzo)
+            elif not sobra and barra.winfo_ismapped():
+                barra.pack_forget()
+
+        interno.bind("<Configure>", ajustar)
+        lienzo.bind("<Configure>", ajustar)
+
+        self._enganchar_rueda(contenedor, lienzo,
+                              hay_scroll=contenedor.winfo_ismapped)
+        return interno, contenedor
+
+    # ---- piezas reutilizables ----
+    def _titulo_seccion(self, parent, texto, ayuda=None):
+        tk.Label(parent, text=texto.upper(), font=F(9, True), fg=DIM2, bg=BG)\
+            .pack(anchor="w", padx=24, pady=(20, 2))
+        if ayuda:
+            tk.Label(parent, text=ayuda, font=F(9), fg=DIM2, bg=BG,
+                     wraplength=640, justify="left").pack(anchor="w", padx=24,
+                                                          pady=(0, 8))
+
+    def _campo(self, parent, valor, on_guardar):
+        """Entrada de texto con su botón Guardar al lado."""
+        fila = tk.Frame(parent, bg=BG)
+        fila.pack(fill="x", padx=24)
+        ent = tk.Entry(fila, font=F(12), bg=CARD, fg=TXT, insertbackground=TXT,
+                       relief="flat", bd=9)
+        ent.pack(side="left", fill="x", expand=True, ipady=3)
+        ent.insert(0, valor or "")
+        widgets.RoundedButton(fila, "Guardar", GREEN, "#0c1626",
+                              lambda: on_guardar(ent), BG, F(10, True),
+                              hover="#54e08f", r=10, padx=16, pady=8,
+                              ancho=self.ANCHO_BOTON)\
+            .pack(side="left", padx=(10, 0))
+        return ent
+
+    def _selector_sentido(self, parent, on_elegir):
+        """Dos opciones visibles, la activa resaltada. Devuelve (frame, pintar)."""
+        marco = tk.Frame(parent, bg=BG)
+        botones = {}
+        for sentido, texto in (("E", "ENTRADA"), ("S", "SALIDA")):
+            b = widgets.RoundedButton(marco, texto, BG, DIM2, None, BG,
+                                      F(10, True), r=10, padx=14, pady=7,
+                                      ancho=self.ANCHO_BOTON, borde=BORDE)
+            b._command = lambda sen=sentido: on_elegir(sen)
+            b.pack(side="left", padx=(0, 6))
+            botones[sentido] = b
+
+        def pintar(actual):
+            """La activa se rellena; la otra queda como contorno, del color del
+            panel. Así se ve cuál está puesta sin manchar la sección de color."""
+            for sentido, b in botones.items():
+                activo = sentido == actual
+                color = GREEN if sentido == "E" else YELLOW
+                b.set_style(fill=(color if activo else BG),
+                            fg=("#0c1626" if activo else DIM2),
+                            hover=(color if activo else BG),
+                            borde=(None if activo else BORDE))
+
+        return marco, pintar
+
+    def _fila_aparato(self, parent, titulo, on_elegir, extra=None):
+        """Una fila de la tabla: nombre + detalle a la izquierda, acciones a la
+        derecha. `extra` agrega un botón antes del selector (ej: «Probar»)."""
+        # Todo comparte el fondo del panel: la fila no es una tarjeta aparte,
+        # es una línea de la misma sección. Solo un filete la separa de la
+        # siguiente.
+        marco = tk.Frame(parent, bg=BG, padx=8, pady=10)
+        marco.pack(fill="x", padx=24, pady=(0, 6))
+
+        izq = tk.Frame(marco, bg=BG)
+        izq.pack(side="left")
+        lbl = tk.Label(izq, text=titulo, font=F(12, True), fg=TXT, bg=BG)
+        lbl.pack(anchor="w")
+        sub = tk.Label(izq, text="", font=F(9), fg=DIM2, bg=BG)
+        sub.pack(anchor="w", pady=(2, 0))
+
+        selector, pintar = self._selector_sentido(marco, on_elegir)
+        selector.pack(side="right")
+        boton_extra = None
+        if extra:
+            boton_extra = widgets.RoundedButton(
+                marco, extra[0], BG, DIM, extra[1], BG, F(10, True),
+                hover=CARD, r=10, padx=14, pady=7, ancho=self.ANCHO_BOTON,
+                borde=BORDE)
+            boton_extra.pack(side="right", padx=(0, 12))
+        return marco, sub, pintar, boton_extra, lbl
+
+    def _encabezado_tabla(self, parent, izquierda, derecha):
+        """Rótulos de columna: dicen qué se está mirando y qué se puede tocar."""
+        fila = tk.Frame(parent, bg=BG)
+        fila.pack(fill="x", padx=40, pady=(4, 0))
+        tk.Label(fila, text=izquierda.upper(), font=F(8, True), fg=DIM2,
+                 bg=BG).pack(side="left")
+        tk.Label(fila, text=derecha.upper(), font=F(8, True), fg=DIM2,
+                 bg=BG).pack(side="right")
+
+    # ---- pestaña 1: terminal ----
+    def _tab_terminal(self, cont, aj):
+        self._titulo_seccion(
+            cont, "Nombre del terminal",
+            "Se sincroniza con Bakelite en los dos sentidos: gana el último "
+            "cambio, venga de aquí o de la web.")
+        estado = tk.Label(cont, text="", font=F(9), fg=DIM2, bg=BG,
+                          wraplength=640, justify="left")
+
+        def guardar_nombre(ent):
+            nuevo = ent.get().strip()
             if not nuevo:
-                aviso_nom.config(text="El nombre no puede quedar vacío.", fg=RED)
+                estado.config(text="El nombre no puede quedar vacío.", fg=RED)
                 return
-            if self.controlador is None:
-                return
+            depurador.accion(f"Renombrar terminal a {nuevo!r}", origen="ajustes")
             quedo = self.controlador.renombrar_terminal(nuevo, usuario="operador")
             if quedo is None:
-                aviso_nom.config(text="No se pudo guardar (BD local no disponible).",
-                                 fg=RED)
+                estado.config(text="No se pudo guardar: la BD local no responde.",
+                              fg=RED)
                 return
             self._ui_nombre_terminal(quedo)
-            aviso_nom.config(text="Guardado. Se sube a Bakelite en cuanto haya conexión.",
-                             fg=DIM2)
+            estado.config(text="Guardado. Se sube a Bakelite en cuanto haya conexión.",
+                          fg=GREEN)
 
-        widgets.RoundedButton(fn, "Guardar", GREEN, "#0c1626", guardar_nombre, BG,
-                              F(10, True), hover="#54e08f", r=10, padx=14, pady=7)\
-            .pack(side="left", padx=(8, 0))
+        nombre = self.controlador.nombre_terminal() if self.controlador else ""
+        self._entrada_nombre = self._campo(cont, nombre, guardar_nombre)
+        estado.pack(anchor="w", padx=24, pady=(8, 0))
 
-        # --- Ubicación del torniquete ---
-        tk.Label(dlg, text="Ubicación del torniquete:", font=F(10, True), fg=DIM, bg=BG)\
-            .pack(anchor="w", padx=30, pady=(12, 2))
-        fu = tk.Frame(dlg, bg=BG)
-        fu.pack(fill="x", padx=30)
-        entrada = tk.Entry(fu, font=F(12), bg=CARD, fg=TXT, insertbackground=TXT,
-                           relief="flat", bd=8)
-        entrada.pack(side="left", fill="x", expand=True, ipady=2)
-        entrada.insert(0, aj.ubicacion or "")
+        self._titulo_seccion(cont, "Ubicación",
+                             "Solo se muestra en la pantalla de este equipo.")
+        estado_u = tk.Label(cont, text="", font=F(9), fg=DIM2, bg=BG)
 
-        def guardar_ubic():
-            aj.ubicacion = entrada.get().strip()
+        def guardar_ubic(ent):
+            aj.ubicacion = ent.get().strip()
             aj.guardar()
             self._refrescar_ubicacion()
+            estado_u.config(text="Ubicación guardada.", fg=GREEN)
 
-        widgets.RoundedButton(fu, "Guardar", GREEN, "#0c1626", guardar_ubic, BG,
-                              F(10, True), hover="#54e08f", r=10, padx=14, pady=7)\
-            .pack(side="left", padx=(8, 0))
+        self._campo(cont, aj.ubicacion, guardar_ubic)
+        estado_u.pack(anchor="w", padx=24, pady=(8, 20))
 
-        # --- Inversión + preview ---
-        prev = tk.Label(dlg, text="", font=("DejaVu Sans Mono", 11), fg=TXT, bg=CARD,
-                        justify="left", padx=18, pady=12)
-        prev.pack(padx=30, fill="x", pady=(16, 0))
+    # ---- pestaña 2: lectoras y relés ----
+    def _tab_dispositivos(self, cont, aj):
+        self._filas_lectoras = {}
+        self._filas_reles = {}
 
-        def actualizar_preview():
-            l1 = "SALIDA" if aj.invertir_lectoras else "ENTRADA"
-            l2 = "ENTRADA" if aj.invertir_lectoras else "SALIDA"
-            prev.config(text=(f"Lectora 1   →   {l1}\n"
-                              f"Lectora 2   →   {l2}\n"
-                              f"Relé ENTRADA →   {aj.comando_rele('E')}\n"
-                              f"Relé SALIDA  →   {aj.comando_rele('S')}"))
+        self._titulo_seccion(
+            cont, "Lectoras",
+            "Toca el botón de cada fila para cambiar su sentido: marcar una "
+            "como ENTRADA deja la otra como SALIDA.")
 
-        def toggle_row(texto, getter, setter):
-            fr = tk.Frame(dlg, bg=BG)
-            fr.pack(fill="x", padx=30, pady=(12, 0))
-            tk.Label(fr, text=texto, font=F(11), fg=TXT, bg=BG).pack(side="left")
-            btn = widgets.RoundedButton(fr, "NORMAL", CARD_BD, TXT, None, BG,
-                                        F(10, True), hover=CARD_BD, r=10, padx=14, pady=6)
+        def refrescar_lectoras():
+            """Lee el estado de AHORA: qué puerto tiene y si está enchufada. El
+            último puerto guardado en la BD sirve de pista, pero si la lectora
+            no está conectada decirlo a secas hace creer que sí lo está."""
+            for n, (marco, sub, pintar, _lbl) in self._filas_lectoras.items():
+                conectada = bool(self.estado_hw.get(f"lectora{n}"))
+                puerto = self._puerto_lectora(n)
+                if conectada and puerto:
+                    sub.config(text=f"● conectada · {puerto}", fg=GREEN)
+                else:
+                    sub.config(text="● sin conectar", fg=RED)
+                pintar(aj.sentido_lectora(n))
 
-            def refresh():
-                on = getter()
-                btn.set_style(text=("INVERTIDO" if on else "NORMAL"),
-                              fill=(YELLOW if on else CARD_BD),
-                              fg=("#0c1626" if on else TXT),
-                              hover=(YELLOW if on else CARD_BD))
+        self._refrescar_lectoras = refrescar_lectoras
+        self._encabezado_tabla(cont, "dispositivo", "sentido")
+        for n in (1, 2):
+            def elegir(sentido, num=n):
+                if aj.sentido_lectora(num) != sentido:
+                    depurador.accion(
+                        f"Lectora {num} pasa a {'ENTRADA' if sentido == 'E' else 'SALIDA'}",
+                        origen="ajustes")
+                    aj.set_sentido_lectora(num, sentido, usuario="operador")
+                    refrescar_lectoras()
+                    self.controlador.notificar_dispositivos()
+                    # El aviso de arriba nombra las lectoras por su sentido:
+                    # si cambia aquí, tiene que cambiar allá en el acto.
+                    self._aplicar_estado(self.estado_hw)
 
-            def click():
-                setter(not getter())
-                aj.guardar()
-                refresh()
-                actualizar_preview()
+            marco, sub, pintar, _, lbl = self._fila_aparato(
+                cont, f"Lectora {n}", elegir)
+            self._filas_lectoras[n] = (marco, sub, pintar, lbl)
+        refrescar_lectoras()
 
-            btn._command = click
-            btn.pack(side="right")
-            refresh()
+        self._titulo_seccion(
+            cont, "¿Cuál lectora es cuál?",
+            "Las lectoras son escáneres: solo leen, no se pueden hacer "
+            "parpadear. Aprieta el botón y pasa una cédula por la que quieras "
+            "reconocer. Esa lectura no abre el torniquete ni queda registrada.")
+        self._lbl_ident = tk.Label(cont, text="", font=F(10), fg=DIM2, bg=BG,
+                                   wraplength=640, justify="left")
 
-        toggle_row("Invertir lectoras  (Entrada ↔ Salida)",
-                   lambda: aj.invertir_lectoras,
-                   lambda v: setattr(aj, "invertir_lectoras", v))
-        toggle_row("Invertir relés  (Entrada ↔ Salida)",
-                   lambda: aj.invertir_reles,
-                   lambda v: setattr(aj, "invertir_reles", v))
+        def identificar():
+            if self.controlador is None:
+                return
+            depurador.accion("Identificar lectora: esperando un escaneo",
+                             origen="ajustes")
+            self.controlador.iniciar_identificacion(
+                lambda numero, rut: self.cola.put(
+                    lambda: self._ui_lectora_identificada(numero, rut, aj)))
+            self._lbl_ident.config(
+                text="Esperando… pasa una cédula por la lectora que quieras reconocer.",
+                fg=BLUE)
+            for n, (marco, sub, pintar, lbl) in self._filas_lectoras.items():
+                lbl.config(fg=TXT)
 
-        # --- probar relés ---
-        tk.Label(dlg, text="Probar torniquetes:", font=F(10), fg=DIM, bg=BG).pack(pady=(18, 6))
-        pr = tk.Frame(dlg, bg=BG)
-        pr.pack()
-        widgets.RoundedButton(pr, "▶  ENTRADA", GREEN, "#0c1626",
-                              lambda: self.controlador.probar_rele("E"), BG, F(10, True),
-                              hover="#54e08f", r=10, padx=14, pady=7).pack(side="left", padx=8)
-        widgets.RoundedButton(pr, "▶  SALIDA", BLUE, "#0c1626",
-                              lambda: self.controlador.probar_rele("S"), BG, F(10, True),
-                              hover="#63b6ff", r=10, padx=14, pady=7).pack(side="left", padx=8)
+        widgets.RoundedButton(cont, "🔍  Identificar lectora", BG, TXT,
+                              identificar, BG, F(10, True), hover=CARD,
+                              r=10, padx=18, pady=8, ancho=self.ANCHO_BOTON * 2,
+                              borde=BORDE)\
+            .pack(anchor="w", padx=24)
+        self._lbl_ident.pack(anchor="w", padx=24, pady=(10, 0))
 
-        # --- probar luces ---
-        tk.Label(dlg, text="Probar luces del semáforo:", font=F(10), fg=DIM, bg=BG).pack(pady=(16, 6))
-        pl = tk.Frame(dlg, bg=BG)
-        pl.pack()
-        for texto, color, bg_btn, hov in (
-            ("Azul", "azul", BLUE, "#63b6ff"), ("Verde", "verde", GREEN, "#54e08f"),
-            ("Rojo", "rojo", RED, "#f47b76"), ("Amarillo", "amarillo", YELLOW, "#f9d074"),
-            ("Apagar", "off", CARD_BD, "#38507a"),
-        ):
-            fg_btn = TXT if color == "off" else "#0c1626"
-            widgets.RoundedButton(pl, texto, bg_btn, fg_btn,
-                                  lambda c=color: self.controlador.probar_luz(c), BG,
-                                  F(10, True), hover=hov, r=10, padx=11, pady=6)\
-                .pack(side="left", padx=4)
+        self._titulo_seccion(
+            cont, "Relés (torniquetes)",
+            "«Probar» acciona ese relé: mira cuál torniquete se abrió y márcalo "
+            "como entrada o salida.")
+        self._lbl_rele = tk.Label(cont, text="", font=F(10), fg=DIM2, bg=BG,
+                                  wraplength=640, justify="left")
 
-        widgets.RoundedButton(dlg, "Cerrar", CARD_BD, TXT, dlg.destroy, BG, F(10, True),
-                              hover="#38507a", r=12, padx=18, pady=8).pack(pady=(20, 0))
-        actualizar_preview()
+        def refrescar_reles():
+            for n, (marco, sub, pintar, _p) in self._filas_reles.items():
+                sub.config(text=f"comando: {aj.comando_de_rele(n)}")
+                pintar(aj.reles.get(n, "E"))
 
+        self._encabezado_tabla(cont, "dispositivo", "probar / sentido")
+        for n in (1, 2):
+            def elegir_rele(sentido, num=n):
+                if aj.reles.get(num, "E") != sentido:
+                    depurador.accion(
+                        f"Relé {num} pasa a {'ENTRADA' if sentido == 'E' else 'SALIDA'}",
+                        origen="ajustes")
+                    aj.set_sentido_rele(num, sentido, usuario="operador")
+                    refrescar_reles()
+                    self.controlador.notificar_dispositivos()
+
+            def probar_rele(num=n):
+                if self.controlador is None:
+                    return
+                depurador.accion(f"Probar relé {num}", origen="ajustes")
+                cmd = self.controlador.probar_rele_numero(num)
+                self._lbl_rele.config(
+                    text=f"Se accionó el relé {num} ({cmd}). "
+                         "Mira qué torniquete se abrió.", fg=BLUE)
+
+            marco, sub, pintar, probar, _ = self._fila_aparato(
+                cont, f"Relé {n}", elegir_rele, extra=("▶  Probar", probar_rele))
+            self._filas_reles[n] = (marco, sub, pintar, probar)
+        refrescar_reles()
+        self._lbl_rele.pack(anchor="w", padx=24, pady=(10, 0))
+
+        self._titulo_seccion(
+            cont, "Diagnóstico",
+            "Parte la pantalla en dos y muestra, paso a paso, lo que se hace y "
+            "lo que se recibe. El registro queda guardado en el equipo.")
+        self._btn_debug = widgets.RoundedButton(
+            cont, "🐞  Modo debugger", BG, TXT, self.alternar_debugger, BG,
+            F(10, True), hover=BG, r=10, padx=18, pady=8,
+            ancho=self.ANCHO_BOTON * 2, borde=BORDE)
+        self._btn_debug.pack(anchor="w", padx=24, pady=(0, 20))
+
+    # ---- pestaña 3: pruebas ----
+    def _tab_pruebas(self, cont, aj=None):
+        self._titulo_seccion(
+            cont, "Abrir torniquete",
+            "Dispara el relé que hoy corresponde a cada sentido. Sirve para "
+            "confirmar que la configuración quedó bien.")
+        pr = tk.Frame(cont, bg=BG)
+        pr.pack(anchor="w", padx=24)
+        for texto, sentido in (("▶  ENTRADA", "E"), ("▶  SALIDA", "S")):
+            widgets.RoundedButton(pr, texto, BG, TXT,
+                                  lambda s=sentido: self.controlador.probar_rele(s),
+                                  BG, F(10, True), hover=BG, r=10, padx=18,
+                                  pady=8, ancho=self.ANCHO_BOTON, borde=BORDE)\
+                .pack(side="left", padx=(0, 10))
+
+        self._titulo_seccion(cont, "Luces del semáforo",
+                             "Comprueba que el Arduino responde.")
+        pl = tk.Frame(cont, bg=BG)
+        pl.pack(anchor="w", padx=24)
+        for texto, color, clave in (("Azul", BLUE, "azul"), ("Verde", GREEN, "verde"),
+                                    ("Roja", RED, "rojo"),
+                                    ("Amarilla", YELLOW, "amarillo")):
+            widgets.RoundedButton(pl, texto, color, "#0c1626",
+                                  lambda c=clave: self.controlador.probar_luz(c),
+                                  BG, F(10, True), hover=color, r=10,
+                                  padx=14, pady=7, ancho=self.ANCHO_BOTON)\
+                .pack(side="left", padx=(0, 8))
+
+        # Apagar no enciende nada: va aparte, sin color y en su propia línea.
+        widgets.RoundedButton(cont, "Apagar", BG, TXT,
+                              lambda: self.controlador.probar_luz("off"),
+                              BG, F(10, True), hover=BG, r=10, padx=14, pady=7,
+                              ancho=self.ANCHO_BOTON, borde=BORDE)\
+            .pack(anchor="w", padx=24, pady=(10, 20))
     # ================= reloj =================
     def _tick_reloj(self):
         now = datetime.datetime.now()
@@ -1058,30 +2101,16 @@ class Interfaz:
             punto.itemconfig(punto._oval, fill=COLOR_PUNTO[color])
 
     def _preparar_luces(self):
+        """Luces del modo PC. Usan el mismo degradado que el torniquete: antes
+        eran dos elipses (núcleo + halo plano) y se notaba el escalón."""
         self._luz_img = {}
         self._luz_ok = False
         try:
-            from PIL import Image, ImageDraw
-        except Exception:  # noqa: BLE001
-            return
-        S, size = 4, 150
-        D = size * S
-
-        def rgb(hx, a=255):
-            hx = hx.lstrip("#")
-            return tuple(int(hx[i:i + 2], 16) for i in (0, 2, 4)) + (a,)
-
-        def luz(color_hex):
-            img = Image.new("RGBA", (D, D), (0, 0, 0, 0))
-            dr = ImageDraw.Draw(img)
-            dr.ellipse([0, 0, D - 1, D - 1], fill=rgb(color_hex, 45))        # halo tenue
-            m = int(D * 0.15)
-            dr.ellipse([m, m, D - m, D - m], fill=rgb(color_hex, 255))       # núcleo sólido
-            return self._png_desde_pil(img.resize((size, size), Image.LANCZOS))
-
-        try:
-            for nombre, (c, _e, _s) in LUCES.items():
-                self._luz_img[nombre] = luz(c)
+            for nombre in LUCES:
+                img = self._imagen_luz(nombre, LUZ_PC_LADO)
+                if img is None:
+                    return
+                self._luz_img[nombre] = img
             self._luz_ok = True
         except Exception as e:  # noqa: BLE001
             log.error("No se pudieron generar las luces: %s", e)
@@ -1090,6 +2119,11 @@ class Interfaz:
     def _mostrar_critico(self, texto):
         self.lbl_critico.config(text="  ⚠  ERROR CRÍTICO: " + str(texto)[:120] + "  ")
         self.lbl_critico.pack(in_=self._banner_cont, before=self._banner_b, pady=(0, 8))
+
+    def _limpiar_critico(self):
+        """El problema se resolvió: el cartel se va. Un aviso que no sabe
+        desaparecer termina mintiendo apenas la causa se corrige."""
+        self.lbl_critico.pack_forget()
 
     def _on_tk_error(self, exc, val, tb):
         logging.getLogger("errores").error("Excepción en callback de Tk: %s", val,

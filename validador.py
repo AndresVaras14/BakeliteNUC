@@ -8,6 +8,7 @@ Implementa la máquina de estados de §7:
     código 2 -> rechazo especial         (rojo)
     código 3 -> lectura inválida / RUT 0  (rojo)
     código 4 -> sin conexión a red        (amarillo)
+    código 5 -> la consulta no respondió a tiempo (amarillo, vuelva a intentar)
 
 En producción, esta clase es el único punto a reemplazar por la consulta real
 a la BD / WebService, manteniendo la misma firma (validar -> Resultado).
@@ -29,6 +30,7 @@ MENSAJES = {
     2: "ERROR LECTURA / REINTENTE",
     3: "ERROR LECTURA / REINTENTE",
     4: "SIN CONEXIÓN A RED",
+    5: "SIN RESPUESTA — VUELVA A INTENTAR",
 }
 
 

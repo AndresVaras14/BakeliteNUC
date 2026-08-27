@@ -347,14 +347,27 @@ se perdió: la operación es **idempotente**, reenviar el mismo par
 2. La API **no** empuja el cambio al NUC: el NUC no expone puertos entrantes.
    El cambio viaja en la siguiente comparación que haga el terminal.
 
+> **La web debe avisarle esto al usuario.** Un cambio hecho desde Bakelite tarda
+> **hasta 60 segundos** en verse en la pantalla del terminal, porque es el
+> terminal quien pregunta. Sin ese aviso, quien renombra ve la web actualizada,
+> mira el torniquete, lo ve con el nombre viejo y concluye que algo falló.
+>
+> Texto sugerido tras guardar:
+> *"Nombre actualizado. El terminal lo mostrará dentro de 1 minuto."*
+>
+> El sentido contrario no necesita aviso: un cambio hecho en el terminal sube al
+> instante y la web lo ve en su siguiente sondeo.
+
 ### 4.3 Ciclo del NUC
 
 - **Al iniciar la aplicación:** comparar (3.1) y actuar según el veredicto.
   Esto reemplaza la verificación de nombre que hoy solo dejaba una advertencia
   en el log.
-- **Cada 5 minutos**, dentro del ciclo del sincronizador: comparar y actuar.
-  Es una llamada liviana y sin escrituras; no necesita ser más frecuente porque
-  el nombre no cambia seguido.
+- **Cada 60 segundos**, dentro del ciclo del sincronizador: comparar y actuar.
+  Es una llamada liviana y sin escrituras. Va más espaciada que el resto de los
+  ciclos del terminal —que laten cada 10 s— a propósito: el nombre cambia cada
+  varios meses, y sondearlo cada 10 s serían 8.640 llamadas diarias por terminal
+  para no encontrar nada.
 - **Inmediatamente después de un cambio local:** `PUT` directo, sin esperar el
   ciclo. Si falla, queda pendiente por `NombreSincronizado = 0`.
 - **Sin conexión:** no se compara ni se sube nada. El nombre local sigue siendo
@@ -403,8 +416,8 @@ Del lado del **NUC**:
 
 7. Renombrar sin conexión funciona, se ve en pantalla y queda pendiente.
 8. Al recuperar la conexión, el cambio pendiente se sube con su fecha original.
-9. Un nombre más nuevo en la API se adopta al iniciar y en el ciclo periódico,
-   conservando la `nombreFecha` remota.
+9. Un nombre más nuevo en la API se adopta al iniciar y en el ciclo periódico
+   de 60 s, conservando la `nombreFecha` remota.
 10. El nombre local nunca se sobrescribe con uno de fecha anterior.
 11. Un `404` no cambia el nombre y queda registrado como error de configuración
     de nivel `CRITICO`.

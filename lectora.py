@@ -102,7 +102,7 @@ class LectoraThread(threading.Thread):
                         data, leyendo = "", False
                         errores += 1
                         self.on_error(self.numero, self.sentido)
-                    time.sleep(0.1)
+                    time.sleep(config.LECTURA_POLL_SEGUNDOS)
 
                 if errores >= config.LECTORA_MAX_ERRORES_CONSECUTIVOS:
                     log.warning("Lectora %d: %d errores seguidos, reabriendo",

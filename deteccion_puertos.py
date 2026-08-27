@@ -48,6 +48,25 @@ def _identidad_linux(dev):
         return dev.lower()
 
 
+def _ancla(texto, dev):
+    """Identificador estable de DÓNDE está enchufado el aparato.
+
+    Las lectoras son CH340 idénticas y no traen número de serie: udev informa
+    el mismo ID_SERIAL para las dos. Lo único que las distingue es el zócalo
+    USB, que udev expone como ID_PATH y no cambia mientras no se muevan de
+    puerto. El Arduino sí trae serie propia y se prefiere esa.
+    """
+    for clave in ("id_serial_short=", "id_path="):
+        for linea in texto.splitlines():
+            linea = linea.strip()
+            pos = linea.find(clave)
+            if pos >= 0:
+                valor = linea[pos + len(clave):].strip()
+                if valor:
+                    return valor
+    return dev
+
+
 def _clasifica(texto):
     t = texto.lower()
     if any(w in t for w in PALABRAS_ARDUINO):
@@ -57,38 +76,70 @@ def _clasifica(texto):
     return None
 
 
-def detectar():
-    """Devuelve {'arduino': ruta|None, 'lectora1': ruta|None, 'lectora2': ruta|None}."""
+def detectar(anclas=None):
+    """Devuelve {'arduino': ruta|None, 'lectora1': ruta|None, 'lectora2': ruta|None,
+    'anclas': {slot: ancla}}.
+
+    `anclas` es el mapa {slot: ancla} de la última vez, para que cada lectora
+    conserve su número. Sin él, la asignación era por orden de aparición: al
+    desenchufar la primera, la sobreviviente pasaba a ser 'lectora1' y el
+    sistema informaba desconectada a la que seguía funcionando.
+
+    Con las anclas, cada aparato vuelve a su lugar y el hueco queda donde de
+    verdad se desenchufó algo.
+    """
     resultado = {"arduino": None, "lectora1": None, "lectora2": None}
-    candidatos = []  # [(dev, tipo)]
+    candidatos = []  # [(dev, tipo, ancla)]
 
     devs = sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"))
     if devs:  # Linux
         for dev in devs:
-            tipo = _clasifica(_identidad_linux(dev))
+            texto = _identidad_linux(dev)
+            tipo = _clasifica(texto)
             if tipo:
-                candidatos.append((dev, tipo))
+                candidatos.append((dev, tipo, _ancla(texto, dev)))
     elif list_ports is not None:  # Windows / fallback
         for p in list_ports.comports():
             texto = f"{p.device} {p.description} {p.hwid}"
             tipo = _clasifica(texto)
             if tipo:
-                candidatos.append((p.device, tipo))
+                candidatos.append((p.device, tipo, p.hwid or p.device))
 
+    anclas = dict(anclas or {})
     usados = set()
 
-    for dev, tipo in candidatos:               # primer Arduino
+    for dev, tipo, _a in candidatos:           # primer Arduino
         if tipo == "arduino" and dev not in usados:
             resultado["arduino"] = dev
             usados.add(dev)
             break
 
-    slot = 1
-    for dev, tipo in candidatos:               # primeras dos lectoras
-        if tipo == "lectora" and dev not in usados and slot <= 2:
-            resultado[f"lectora{slot}"] = dev
-            usados.add(dev)
-            slot += 1
+    lectoras = [(dev, a) for dev, tipo, a in candidatos
+                if tipo == "lectora" and dev not in usados]
+
+    # 1) Cada lectora vuelve al número donde estaba enchufada.
+    for slot in ("lectora1", "lectora2"):
+        esperado = anclas.get(slot)
+        if not esperado:
+            continue
+        for dev, ancla in lectoras:
+            if ancla == esperado and dev not in usados:
+                resultado[slot] = dev
+                usados.add(dev)
+                break
+
+    # 2) Lo que sobra ocupa los números que hayan quedado libres.
+    libres = [s for s in ("lectora1", "lectora2") if resultado[s] is None]
+    for dev, ancla in lectoras:
+        if dev in usados or not libres:
+            continue
+        resultado[libres.pop(0)] = dev
+        usados.add(dev)
+
+    # El ancla de cada una, para guardarla y volver a usarla la próxima vez.
+    por_dev = {dev: ancla for dev, ancla in lectoras}
+    resultado["anclas"] = {s: por_dev.get(resultado[s]) for s in ("lectora1", "lectora2")
+                           if resultado[s]}
 
     log.info("Detección de puertos: %s", resultado)
     return resultado

@@ -172,6 +172,62 @@ IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'CK_Terminales_
 GO
 
 /* ---------------------------------------------------------------------------
+   3.b Lectoras y Reles
+       Que lectora es ENTRADA y cual es SALIDA, y lo mismo para los reles. Antes
+       vivia en ajustes.json como dos booleanos "invertir_*"; ahora es explicito
+       y se guarda aca, para que la configuracion sobreviva al equipo y se pueda
+       consultar desde afuera.
+
+       El indice unico sobre Sentido es el que garantiza lo que importa: una
+       ENTRADA y una SALIDA, nunca dos iguales. Por eso los cambios se hacen en
+       UNA sola sentencia con CASE (el motor valida el unique al terminarla).
+   --------------------------------------------------------------------------- */
+IF OBJECT_ID(N'dbo.Lectoras', N'U') IS NULL
+CREATE TABLE dbo.Lectoras (
+    Numero            INT           NOT NULL CONSTRAINT PK_Lectoras PRIMARY KEY,
+    Sentido           CHAR(1)       NOT NULL,   -- E = ENTRADA, S = SALIDA
+    Descripcion       NVARCHAR(150) NULL,       -- lo que escriba el operador
+    UltimoPuerto      NVARCHAR(100) NULL,       -- /dev/ttyUSB0, para reconocerla
+    FechaModificacion DATETIME2(0)  NULL,
+    ModificadoPor     NVARCHAR(100) NULL,
+    CONSTRAINT CK_Lectoras_Sentido CHECK (Sentido IN ('E','S'))
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Lectoras_Sentido')
+    CREATE UNIQUE INDEX UX_Lectoras_Sentido ON dbo.Lectoras (Sentido);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM dbo.Lectoras)
+    INSERT dbo.Lectoras (Numero, Sentido, Descripcion)
+    VALUES (1, 'E', N'Lectora 1'), (2, 'S', N'Lectora 2');
+GO
+
+IF OBJECT_ID(N'dbo.Reles', N'U') IS NULL
+CREATE TABLE dbo.Reles (
+    Numero            INT           NOT NULL CONSTRAINT PK_Reles PRIMARY KEY,
+    Sentido           CHAR(1)       NOT NULL,   -- E = ENTRADA, S = SALIDA
+    Comando           VARCHAR(10)   NOT NULL,   -- ASCII que entiende el Arduino
+    Descripcion       NVARCHAR(150) NULL,
+    FechaModificacion DATETIME2(0)  NULL,
+    ModificadoPor     NVARCHAR(100) NULL,
+    CONSTRAINT CK_Reles_Sentido CHECK (Sentido IN ('E','S'))
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Reles_Sentido')
+    CREATE UNIQUE INDEX UX_Reles_Sentido ON dbo.Reles (Sentido);
+GO
+
+/* El mapeo "cruzado" de fabrica: el rele 1 (R2*) abre la ENTRADA. Ver 6.1 de
+   ESPECIFICACION_HARDWARE.md. Si el cableado real esta al reves, se corrige
+   desde Ajustes y queda guardado aca. */
+IF NOT EXISTS (SELECT 1 FROM dbo.Reles)
+    INSERT dbo.Reles (Numero, Sentido, Comando, Descripcion)
+    VALUES (1, 'E', 'R2*', N'Rele 1'), (2, 'S', 'R1*', N'Rele 2');
+GO
+
+/* ---------------------------------------------------------------------------
    4. Versiones de la aplicacion
       Pueden cargarse varias, pero solo UNA con Activo = 1. El indice filtrado
       unico lo garantiza a nivel de motor.

@@ -1,5 +1,15 @@
 {
-  "invertir_lectoras": false,
-  "invertir_reles": false,
-  "ubicacion": "Principal"
+  "ubicacion": "waaa",
+  "lectoras": {
+    "1": "E",
+    "2": "S"
+  },
+  "reles": {
+    "1": "E",
+    "2": "S"
+  },
+  "comandos": {
+    "1": "R2*",
+    "2": "R1*"
+  }
 }

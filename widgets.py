@@ -53,19 +53,30 @@ def _dibuja_redondo(dr, box, r, fill):
     dr.pieslice([x2 - 2 * r, y2 - 2 * r, x2, y2], 0, 90, fill=fill)
 
 
-def rounded_image(w, h, r, fill):
+def rounded_image(w, h, r, fill, borde=None, grosor=2):
     """tk.PhotoImage de un rectángulo redondeado (transparente fuera del borde).
+
+    Con `borde` queda solo el contorno: se dibuja la figura del color del borde
+    y encima otra más chica del color de fondo. Sirve para botones que no deben
+    aparecer como un bloque de color sobre el panel.
+
     Nunca lanza: si algo falla, devuelve None y el llamador cae a un estilo plano."""
     if not _PIL:
         return None
-    clave = (w, h, r, fill)
+    clave = (w, h, r, fill, borde, grosor)
     if clave in _CACHE:
         return _CACHE[clave]
     try:
         S = 4
         img = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
         dr = ImageDraw.Draw(img)
-        _dibuja_redondo(dr, [0, 0, w * S - 1, h * S - 1], r * S, _rgb(fill))
+        if borde:
+            _dibuja_redondo(dr, [0, 0, w * S - 1, h * S - 1], r * S, _rgb(borde))
+            g = grosor * S
+            _dibuja_redondo(dr, [g, g, w * S - 1 - g, h * S - 1 - g],
+                            max(r * S - g, 1), _rgb(fill))
+        else:
+            _dibuja_redondo(dr, [0, 0, w * S - 1, h * S - 1], r * S, _rgb(fill))
         ph = _pil_to_photo(img.resize((w, h), Image.LANCZOS))
         _CACHE[clave] = ph
         return ph
@@ -111,11 +122,15 @@ class RoundedButton(tk.Label):
     """Botón con fondo redondeado y estado hover. Estilo reconfigurable."""
 
     def __init__(self, parent, text, fill, fg, command, bg, font,
-                 hover=None, padx=18, pady=8, r=12, **kw):
+                 hover=None, padx=18, pady=8, r=12, ancho=None, borde=None, **kw):
+        """`ancho` fija un ancho mínimo en píxeles. Sirve para que una fila de
+        botones quede pareja aunque sus textos midan distinto."""
         self._text = text
         self._font = font
         self._bg = bg
         self._padx, self._pady, self._r = padx, pady, r
+        self._ancho = ancho
+        self._borde = borde
         self._command = command
         super().__init__(parent, cursor="hand2", bd=0, **kw)
         self.set_style(text=text, fill=fill, fg=fg, hover=hover)
@@ -123,7 +138,11 @@ class RoundedButton(tk.Label):
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
 
-    def set_style(self, text=None, fill=None, fg=None, hover=None):
+    def set_style(self, text=None, fill=None, fg=None, hover=None, borde=False):
+        """`borde` acepta None para quitarlo; por eso el defecto es False
+        (= no tocar), y no None."""
+        if borde is not False:
+            self._borde = borde
         if text is not None:
             self._text = text
         if fill is not None:
@@ -134,9 +153,13 @@ class RoundedButton(tk.Label):
             self._hover = hover
         f = tkfont.Font(font=self._font)
         w = f.measure(self._text) + self._padx * 2
+        if self._ancho:
+            w = max(w, self._ancho)
         h = f.metrics("linespace") + self._pady * 2
-        self._img = rounded_image(w, h, self._r, self._fill)
-        self._img_hover = rounded_image(w, h, self._r, getattr(self, "_hover", self._fill))
+        self._img = rounded_image(w, h, self._r, self._fill, borde=self._borde)
+        self._img_hover = rounded_image(w, h, self._r,
+                                        getattr(self, "_hover", self._fill),
+                                        borde=self._borde)
         if self._img is None:   # respaldo sin PIL
             self.config(text=self._text, font=self._font, fg=self._fg, bg=self._fill,
                         padx=self._padx, pady=self._pady, image="")
