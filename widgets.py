@@ -37,8 +37,8 @@ def _pil_to_photo(img):
     ph = tk.PhotoImage(file=ruta)
     try:
         os.remove(ruta)
-    except OSError:
-        pass
+    except OSError as e:
+        log.debug("No se pudo eliminar el PNG temporal %s: %s", ruta, e)
     return ph
 
 

@@ -1,4 +1,6 @@
 pyserial>=3.5
+# SQLite no figura aquí porque el módulo sqlite3 viene incluido con Python en
+# Windows y Linux; los instaladores lo verifican antes de iniciar la app.
 # Opcional: suaviza el círculo de AUTORIZADO/DENEGADO (antialiasing).
 # Si no se instala, la app usa un respaldo con glifo y funciona igual.
 Pillow>=9.0
@@ -6,3 +8,7 @@ Pillow>=9.0
 # BD local del torniquete: SQL Server (BakeliteTorniquete).
 # Requiere ademas el driver ODBC de Microsoft instalado en el sistema operativo.
 pyodbc>=5.0
+
+# Solo se instala en Windows. Es el respaldo FreeTDS cuando ODBC/Schannel no
+# puede crear la sesión TLS; Linux continúa usando pyodbc + su driver ODBC.
+pymssql>=2.3.13; sys_platform == "win32"

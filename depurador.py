@@ -67,7 +67,7 @@ class Depurador:
     def info(self, texto, origen=None):
         self.registrar(INFO, texto, origen)
 
-    def registrar(self, flujo, texto, origen=None):
+    def registrar(self, flujo, texto, origen=None, registrar_en_logging=True):
         """Arma la línea, la guarda y la reparte. No revienta nunca: un fallo
         acá no puede tumbar el acceso de una persona."""
         linea = self._formatear(flujo, texto, origen)
@@ -82,6 +82,14 @@ class Depurador:
                 fn(linea)
             except Exception as e:  # noqa: BLE001
                 log.debug("Suscriptor de depuración falló: %s", e)
+        # Las acciones manuales del flujo también entran a la bitácora SQLite.
+        # Cuando esta llamada viene desde ManejadorDepuracion se desactiva para
+        # no duplicar cada LogRecord ni crear un bucle.
+        if registrar_en_logging:
+            logging.getLogger("flujo").info(
+                texto,
+                extra={"flujo": flujo, "origen": origen},
+            )
         return linea
 
     @staticmethod
@@ -150,14 +158,15 @@ class ManejadorDepuracion(logging.Handler):
     def emit(self, record):
         # El propio depurador escribe logs cuando algo le falla; reenviarlos
         # aquí sería un bucle.
-        if record.name == "depurador":
+        if record.name in ("depurador", "flujo", "bitacora"):
             return
         try:
             flujo = RESPUESTA if record.levelno >= logging.WARNING else INFO
             texto = record.getMessage()
             if record.levelno >= logging.ERROR:
                 texto = f"ERROR: {texto}"
-            self.depurador.registrar(flujo, texto, origen=record.name)
+            self.depurador.registrar(
+                flujo, texto, origen=record.name, registrar_en_logging=False)
         except Exception:  # noqa: BLE001
             self.handleError(record)
 

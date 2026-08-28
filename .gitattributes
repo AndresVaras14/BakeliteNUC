@@ -1,0 +1,4 @@
+# Los scripts deben conservar el final de línea que entiende cada sistema,
+# independientemente del equipo desde el que se edite o clone el proyecto.
+*.sh text eol=lf
+*.bat text eol=crlf

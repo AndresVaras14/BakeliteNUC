@@ -186,8 +186,8 @@ class Interfaz:
         self.root.report_callback_exception = self._on_tk_error
         try:
             self.root.attributes("-fullscreen", True)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            log.debug("El entorno no permitió activar pantalla completa: %s", e)
         self.root.bind("<Escape>", lambda e: self.root.attributes("-fullscreen", False))
         self.root.bind("<F11>", self._toggle_fs)
         self.root.bind("<F2>", lambda e: self._abrir_ajustes("ajustes"))
@@ -209,9 +209,6 @@ class Interfaz:
         # El equipo arranca como pantalla de torniquete: es su uso normal. El
         # modo PC queda a un clic para operar o configurar.
         self.set_modo("torniquete")
-
-        if not self.sim and not all(self.estado_hw.values()):
-            self.root.after(400, self._abrir_estado)
 
     # ================= construcción =================
     def _construir(self):
@@ -1176,8 +1173,8 @@ class Interfaz:
         if refrescar and self._dlg is not None and tk.Toplevel.winfo_exists(self._dlg):
             try:
                 refrescar()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                log.debug("No se pudo refrescar el estado de dispositivos: %s", e)
 
     def set_nombre_terminal(self, nombre):
         """El nombre cambió en Bakelite y el sincronizador lo adoptó. Llega
@@ -1278,8 +1275,8 @@ class Interfaz:
         if en_linea and ultima:
             try:
                 txt += f"  ·  {self._hora_hm(ultima)}"
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                log.debug("No se pudo formatear la última conexión: %s", e)
         lbl.config(text=txt, fg=DIM if en_linea else RED)
         self._estado_servicios[servicio] = (en_linea, txt)
         self._t_servicio(servicio, en_linea, txt)
@@ -1481,8 +1478,8 @@ class Interfaz:
         if refrescar and self._dlg is not None and tk.Toplevel.winfo_exists(self._dlg):
             try:
                 refrescar()
-            except Exception:  # noqa: BLE001  el diálogo pudo cerrarse mientras tanto
-                pass
+            except Exception as e:  # noqa: BLE001  el diálogo pudo cerrarse mientras tanto
+                log.debug("No se actualizó el diálogo de estado ya cerrado: %s", e)
 
     def _abrir_estado(self):
         if self._dlg_estado is not None and tk.Toplevel.winfo_exists(self._dlg_estado):
@@ -1566,8 +1563,8 @@ class Interfaz:
                      f"actualmente como {sentido}. No se pudo leer el RUT.")
         try:
             self._lbl_ident.config(text=texto, fg=GREEN if rut else YELLOW)
-        except Exception:  # noqa: BLE001  el diálogo pudo cerrarse mientras tanto
-            pass
+        except Exception as e:  # noqa: BLE001  el diálogo pudo cerrarse mientras tanto
+            log.debug("No se actualizó el diálogo de identificación ya cerrado: %s", e)
 
     def _refrescar_nombre_terminal(self):
         nombre = None
@@ -1994,8 +1991,8 @@ class Interfaz:
         ph = tk.PhotoImage(file=ruta)
         try:
             os.remove(ruta)
-        except OSError:
-            pass
+        except OSError as e:
+            log.debug("No se pudo eliminar el PNG temporal %s: %s", ruta, e)
         return ph
 
     def _preparar_badges(self):
@@ -2171,7 +2168,7 @@ class Interfaz:
         try:
             self._mostrar_critico(str(val))
         except Exception:  # noqa: BLE001
-            pass
+            log.exception("No se pudo mostrar en pantalla la excepción de Tk.")
 
     # ================= varios =================
     def _toggle_fs(self, _e=None):

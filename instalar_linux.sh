@@ -12,6 +12,7 @@ set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
+PYTHON_EXE="${BAKELITE_PYTHON:-$(command -v python3)}"
 
 VERDE=$'\e[32m'; ROJO=$'\e[31m'; AMAR=$'\e[33m'; AZUL=$'\e[36m'; FIN=$'\e[0m'
 SOLO_VERIFICAR=0
@@ -79,18 +80,21 @@ fi
 
 # -----------------------------------------------------------------------------
 paso "3. Python y sus módulos"
-if python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)"; then
-    ok "Python $(python3 --version | cut -d' ' -f2)"
+if "$PYTHON_EXE" -c "import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)"; then
+    ok "Python $("$PYTHON_EXE" --version | cut -d' ' -f2)"
+    ok "Intérprete: $PYTHON_EXE"
 else
     falla "Se necesita Python 3.9 o superior."
 fi
-for m in tkinter serial pyodbc PIL; do
-    if python3 -c "import $m" 2>/dev/null; then
+for m in tkinter serial sqlite3 pyodbc PIL; do
+    if "$PYTHON_EXE" -c "import $m" 2>/dev/null; then
         ok "módulo $m"
     elif [ "$m" = "pyodbc" ]; then
         echo "  Falta pyodbc; se instala con pip."
-        hacer python3 -m pip install --break-system-packages -q pyodbc \
+        hacer "$PYTHON_EXE" -m pip install --break-system-packages -q pyodbc \
             && ok "pyodbc instalado" || falla "No se pudo instalar pyodbc."
+    elif [ "$m" = "sqlite3" ]; then
+        falla "Este Python no incluye sqlite3. Instala el paquete completo de Python 3."
     elif [ "$m" = "PIL" ]; then
         aviso "Pillow no está: la pantalla funciona con un respaldo más simple."
     else
@@ -100,7 +104,7 @@ done
 
 # -----------------------------------------------------------------------------
 paso "4. Driver ODBC"
-DRIVERS=$(python3 -c "import pyodbc; print(', '.join(pyodbc.drivers()))" 2>/dev/null)
+DRIVERS=$("$PYTHON_EXE" -c "import pyodbc; print(', '.join(pyodbc.drivers()))" 2>/dev/null)
 if [ -n "$DRIVERS" ]; then
     ok "Disponibles: $DRIVERS"
 else
@@ -124,8 +128,8 @@ paso "6. Hardware conectado"
 PUERTOS=$(ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null)
 if [ -n "$PUERTOS" ]; then
     for d in $PUERTOS; do ok "$d"; done
-    if python3 -c "import serial" 2>/dev/null; then
-        python3 - <<'PY' 2>/dev/null || aviso "No se pudo clasificar el hardware."
+    if "$PYTHON_EXE" -c "import serial" 2>/dev/null; then
+        "$PYTHON_EXE" - <<'PY' 2>/dev/null || aviso "No se pudo clasificar el hardware."
 import sys; sys.path.insert(0, ".")
 import deteccion_puertos
 r = deteccion_puertos.detectar({})
@@ -142,7 +146,7 @@ fi
 paso "7. Base de datos"
 if [ "$SIN_BD" = 1 ]; then
     aviso "Omitida por --sin-bd."
-elif python3 -c "
+elif "$PYTHON_EXE" -c "
 import sys; sys.path.insert(0, '.')
 import basedatos
 bd = basedatos.BDLocal()
@@ -153,7 +157,7 @@ else
     aviso "La base no responde todavía."
     echo "     Para crearla, con el motor de SQL Server corriendo:"
     echo "       sqlcmd -S localhost -U sa -P 'TU_CLAVE' -C -i bd/crear_bd_completa.sql"
-    echo "     La app arranca igual sin base: las marcas se encolan en registros.json."
+    echo "     La app arranca igual sin SQL Server: las marcas se encolan en bakelite_nuc.db."
 fi
 
 # -----------------------------------------------------------------------------
@@ -170,7 +174,7 @@ else
 Type=Application
 Name=Bakelite Control de Acceso
 Comment=Se levanta al iniciar sesión; supervisor.py lo relanza si se cae
-Exec=/usr/bin/python3 $DIR/supervisor.py
+Exec=$PYTHON_EXE $DIR/supervisor.py
 Path=$DIR
 Terminal=false
 X-GNOME-Autostart-enabled=true
@@ -194,7 +198,7 @@ if [ "$FALLOS" -eq 0 ]; then
     echo "  ${VERDE}Sin fallos${FIN}${AVISOS:+, $AVISOS aviso(s)}"
     echo
     echo "  Para arrancar ahora:"
-    echo "     cd $DIR && python3 supervisor.py"
+    echo "     cd $DIR && \"$PYTHON_EXE\" supervisor.py"
     [ "$SOLO_VERIFICAR" = 0 ] && echo "  Al reiniciar el equipo arrancará solo."
 else
     echo "  ${ROJO}$FALLOS fallo(s)${FIN} y $AVISOS aviso(s). Revisa lo marcado arriba."

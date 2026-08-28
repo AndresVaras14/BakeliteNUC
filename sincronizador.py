@@ -4,7 +4,7 @@ Sincronizador: sube cada marca pendiente a la BD local (SQL Server) y a la API d
 Bakelite, y reintenta las que queden pendientes. Cumple el contrato de
 integración (CONTRATO_INTEGRACION_TORNIQUETE.md):
 
-  - POST https://bakeliteapi.sopytec.cl/api/terminal/events  (Content-Type JSON)
+  - POST config.ENDPOINT_REGISTRAR_EVENTO  (Content-Type JSON)
   - Envía el payload EXACTO guardado en la cola local (mismo idEvento en reintentos).
   - HTTP 201 REGISTRADO o HTTP 200 DUPLICADO -> entregado (se marca subido_api=1).
   - HTTP 400 -> datos inválidos: no se reintenta (subido_api=-1), se guarda el detalle.
@@ -46,7 +46,9 @@ class Sincronizador(threading.Thread):
         # Un 400 o un 404 en el nombre no se reintenta en bucle: se corta hasta
         # el próximo arranque, cuando la configuración pudo haberse corregido.
         self._nombre_bloqueado = False
-        self._stop = threading.Event()
+        # No llamar a este atributo ``_stop``: Thread.join() usa internamente
+        # un método con ese nombre y dejaría de poder esperar el cierre.
+        self._detener_evento = threading.Event()
         self._restaurar_estado()
         self._wake = threading.Event()
 
@@ -61,7 +63,7 @@ class Sincronizador(threading.Thread):
         self._incidente_abierto = self.bd_local.incidente_abierto("BAKELITE") is not None
 
     def detener(self):
-        self._stop.set()
+        self._detener_evento.set()
         self._wake.set()
 
     def notificar(self):
@@ -77,7 +79,7 @@ class Sincronizador(threading.Thread):
             log.error("Error en la comprobación inicial de conexión: %s", e)
 
         espera = config.SINCRONIZAR_INTERVALO_SEGUNDOS
-        while not self._stop.is_set():
+        while not self._detener_evento.is_set():
             try:
                 hubo_fallo_red = self._ciclo()
             except Exception as e:  # noqa: BLE001
@@ -157,7 +159,7 @@ class Sincronizador(threading.Thread):
             self._registrar_envio(ev, "OK", estado_api="SIMULADO")
             self._marcar_online()
             return "ok"
-        if not config.API_URL:
+        if not config.ENDPOINT_REGISTRAR_EVENTO:
             return "reintentar"
 
         payload = ev.get("payload")
@@ -168,7 +170,8 @@ class Sincronizador(threading.Thread):
 
         cuerpo_envio = json.dumps(payload, ensure_ascii=False)
         req = urllib.request.Request(
-            config.API_URL, data=cuerpo_envio.encode("utf-8"), method="POST",
+            config.ENDPOINT_REGISTRAR_EVENTO,
+            data=cuerpo_envio.encode("utf-8"), method="POST",
             headers={"Content-Type": "application/json"})
         t0 = time.monotonic()
         try:
@@ -305,7 +308,7 @@ class Sincronizador(threading.Thread):
             - 404 -> la ruta no existe: la API no está publicada. CAÍDA.
             - 5xx, 408, 429, timeout, red -> CAÍDA.
 
-        Con `config.API_URL_PING` definido (por ejemplo un /health) se usa esa
+        Con `config.ENDPOINT_ESTADO_API` definido se usa esa ruta
         URL con GET, que es más limpio y no toca el endpoint de marcas.
         """
         self._ultimo_ping = time.monotonic()
@@ -313,12 +316,12 @@ class Sincronizador(threading.Thread):
             self._marcar_online()
             return
 
-        if config.API_URL_PING:
-            url, datos, metodo = config.API_URL_PING, None, "GET"
+        if config.ENDPOINT_ESTADO_API:
+            url, datos, metodo = config.ENDPOINT_ESTADO_API, None, "GET"
             cabeceras = {}
-        elif config.API_URL:
+        elif config.ENDPOINT_REGISTRAR_EVENTO:
             # Sonda sin efectos: cuerpo vacío, la API lo rechaza por validación.
-            url, datos, metodo = config.API_URL, b"{}", "POST"
+            url, datos, metodo = config.ENDPOINT_REGISTRAR_EVENTO, b"{}", "POST"
             cabeceras = {"Content-Type": "application/json"}
         else:
             return
@@ -400,16 +403,16 @@ class Sincronizador(threading.Thread):
 
     # ---- Verificación del terminal ----
     def verificar_terminal(self):
-        """Consulta GET /api/terminal/{id} solo para comprobar que el terminal
+        """Consulta ENDPOINT_OBTENER_TERMINAL para comprobar que el terminal
         existe y está activo en Bakelite.
 
         El nombre no se toca aquí: se sincroniza en ambos sentidos por su propio
         ciclo (ver sincronizar_nombre y
         CONTRATO_SINCRONIZACION_NOMBRE_TERMINAL.md).
         """
-        if not config.API_URL_TERMINAL:
+        if not config.ENDPOINT_OBTENER_TERMINAL:
             return None
-        url = f"{config.API_URL_TERMINAL.rstrip('/')}/{config.ID_TERMINAL}"
+        url = config.ENDPOINT_OBTENER_TERMINAL.format(id=config.ID_TERMINAL)
         try:
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=config.API_TIMEOUT_SEGUNDOS) as resp:
@@ -463,8 +466,9 @@ class Sincronizador(threading.Thread):
         """
         if not config.USAR_BD_LOCAL or self._nombre_bloqueado:
             return None
-        if not (config.API_URL_NOMBRE_COMPARAR and config.API_URL_NOMBRE_HACIA_NUC
-                and config.API_URL_NOMBRE_DESDE_NUC):
+        if not (config.ENDPOINT_COMPARAR_NOMBRE_TERMINAL
+                and config.ENDPOINT_OBTENER_NOMBRE_TERMINAL
+                and config.ENDPOINT_ACTUALIZAR_NOMBRE_TERMINAL):
             return None
         if not forzar and self.en_linea is False:
             return None            # sin red: el nombre local manda en pantalla
@@ -498,7 +502,7 @@ class Sincronizador(threading.Thread):
         payload = {"nombre": term.get("nombre"), "nombreFecha": fecha,
                    "nombreOrigen": "LOCAL"}
         code, cuerpo = self._llamar_nombre(
-            "POST", self._url_nombre(config.API_URL_NOMBRE_COMPARAR), payload)
+            "POST", self._url_nombre(config.ENDPOINT_COMPARAR_NOMBRE_TERMINAL), payload)
         if code != 200:
             return None
         try:
@@ -521,7 +525,7 @@ class Sincronizador(threading.Thread):
     def _bajar_nombre(self):
         """GET .../hacia-nuc — adopta el nombre de Bakelite con SU fecha."""
         code, cuerpo = self._llamar_nombre(
-            "GET", self._url_nombre(config.API_URL_NOMBRE_HACIA_NUC))
+            "GET", self._url_nombre(config.ENDPOINT_OBTENER_NOMBRE_TERMINAL))
         if code != 200:
             return None
         try:
@@ -547,7 +551,7 @@ class Sincronizador(threading.Thread):
         payload = {"nombre": term.get("nombre"), "nombreFecha": fecha,
                    "nombrePor": term.get("nombre_por")}
         code, cuerpo = self._llamar_nombre(
-            "PUT", self._url_nombre(config.API_URL_NOMBRE_DESDE_NUC), payload)
+            "PUT", self._url_nombre(config.ENDPOINT_ACTUALIZAR_NOMBRE_TERMINAL), payload)
         if code != 200:
             return None
         try:
@@ -620,13 +624,13 @@ class Sincronizador(threading.Thread):
 
     # ---- Aviso de cortes a BakeliteApi ----
     def _avisar_incidentes(self):
-        """Informa los cortes ya recuperados (POST /api/terminal/incidents).
+        """Informa los cortes recuperados usando ENDPOINT_REGISTRAR_INCIDENTE.
 
         El `idIncidente` es el UUID que creó la BD local al abrir el corte y se
         reenvía idéntico en cada reintento: la API deduplica por
         (idTerminal, idIncidente). Del terminal solo viaja su id, nada más.
         """
-        if not config.USAR_BD_LOCAL or not config.API_URL_INCIDENTES:
+        if not config.USAR_BD_LOCAL or not config.ENDPOINT_REGISTRAR_INCIDENTE:
             return
         for inc in self.bd_local.incidentes_por_avisar():
             payload = self._payload_incidente(inc)
@@ -673,7 +677,7 @@ class Sincronizador(threading.Thread):
         """Devuelve False solo si se cayó la red (para cortar el ciclo)."""
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
-            config.API_URL_INCIDENTES, data=data, method="POST",
+            config.ENDPOINT_REGISTRAR_INCIDENTE, data=data, method="POST",
             headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=config.API_TIMEOUT_SEGUNDOS) as resp:

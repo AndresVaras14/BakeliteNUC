@@ -38,11 +38,11 @@ class LectoraThread(threading.Thread):
         self.on_inicio = on_inicio          # cuando llega el primer byte
         self.on_trama = on_trama            # (trama, numero, sentido)
         self.on_error = on_error            # (numero, sentido) lectura inválida
-        self._stop = threading.Event()
+        self._detener_evento = threading.Event()
         self.ser = None
 
     def detener(self):
-        self._stop.set()
+        self._detener_evento.set()
 
     def _abrir(self):
         if serial is None or not self.puerto:
@@ -52,8 +52,8 @@ class LectoraThread(threading.Thread):
                                      timeout=config.TIMEOUT_LECTORA)
             try:
                 self.ser.reset_input_buffer()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                log.debug("Lectora %d no pudo limpiar el buffer: %s", self.numero, e)
             log.info("Lectora %d (%s) abierta en %s",
                      self.numero, self.sentido, self.puerto)
             return True
@@ -64,7 +64,7 @@ class LectoraThread(threading.Thread):
             return False
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._detener_evento.is_set():
             if not self._abrir():
                 time.sleep(5)   # reintento sin puerto (§10)
                 continue
@@ -75,7 +75,7 @@ class LectoraThread(threading.Thread):
             t_ultimo = time.time()
             t_abierta = time.time()
 
-            while not self._stop.is_set():
+            while not self._detener_evento.is_set():
                 try:
                     n = self.ser.in_waiting
                 except Exception as e:  # noqa: BLE001
@@ -115,6 +115,6 @@ class LectoraThread(threading.Thread):
             try:
                 if self.ser:
                     self.ser.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                log.debug("Lectora %d no pudo cerrar el puerto: %s", self.numero, e)
             self.ser = None

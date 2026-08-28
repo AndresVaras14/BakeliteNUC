@@ -62,7 +62,7 @@ class SincronizadorDispositivos(threading.Thread):
         self.on_cambio = on_cambio        # callback() cuando la config cambió desde la web
         self.intervalo = config.DISPOSITIVOS_INTERVALO_SEGUNDOS
         self.detenido_por_inactivo = False
-        self._stop = threading.Event()
+        self._detener_evento = threading.Event()
         self._ahora = threading.Event()   # despierta para mandar de inmediato
         self._fallos = 0
         self._404_seguidos = 0            # ver _es_config_rota()
@@ -74,7 +74,7 @@ class SincronizadorDispositivos(threading.Thread):
         self._id_enviado = None      # el que viajó en el último envío
 
     def detener(self):
-        self._stop.set()
+        self._detener_evento.set()
         self._ahora.set()
 
     def notificar(self):
@@ -84,10 +84,10 @@ class SincronizadorDispositivos(threading.Thread):
 
     @property
     def url(self):
-        return config.API_URL_DISPOSITIVOS.format(id=config.ID_TERMINAL)
+        return config.ENDPOINT_SINCRONIZAR_DISPOSITIVOS.format(id=config.ID_TERMINAL)
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._detener_evento.is_set():
             comienzo = time.monotonic()
             try:
                 espera = self._sincronizar()
@@ -104,7 +104,7 @@ class SincronizadorDispositivos(threading.Thread):
 
     # ---- Un ciclo ----
     def _sincronizar(self):
-        if not config.USAR_BD_LOCAL or not config.API_URL_DISPOSITIVOS:
+        if not config.USAR_BD_LOCAL or not config.ENDPOINT_SINCRONIZAR_DISPOSITIVOS:
             return self.intervalo
         lectoras = self.bd_local.lectoras()
         reles = self.bd_local.reles()
@@ -133,6 +133,7 @@ class SincronizadorDispositivos(threading.Thread):
             with urllib.request.urlopen(
                     peticion, timeout=config.DISPOSITIVOS_TIMEOUT_SEGUNDOS) as resp:
                 datos = json.loads(resp.read().decode("utf-8", "ignore") or "{}")
+            log.debug("Sincronización de dispositivos aceptada: %s", datos)
         except urllib.error.HTTPError as e:
             return self._rechazado(e)
         except Exception as e:  # noqa: BLE001

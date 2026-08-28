@@ -22,6 +22,7 @@ import subprocess
 from logging.handlers import RotatingFileHandler
 
 import config
+from bitacora import ManejadorBitacoraSQLite
 
 os.makedirs(config.DIR_LOGS, exist_ok=True)
 log = logging.getLogger("supervisor")
@@ -31,6 +32,10 @@ _h = RotatingFileHandler(config.ARCHIVO_LOG_ERRORES, maxBytes=1_000_000, backupC
 _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 log.addHandler(_h)
 log.addHandler(logging.StreamHandler())
+try:
+    log.addHandler(ManejadorBitacoraSQLite())
+except Exception as e:  # noqa: BLE001
+    log.error("No se pudo activar la bitácora SQLite del supervisor: %s", e)
 
 MAIN = os.path.join(config.BASE_DIR, "main.py")
 

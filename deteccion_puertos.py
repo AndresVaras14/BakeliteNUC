@@ -2,8 +2,9 @@
 """
 Detección y clasificación de puertos serie (§2 y §3).
 
-Clasifica cada puerto por texto (udevadm en Linux, description+hwid en Windows):
-    - Arduino  -> palabra 'arduino'
+Clasifica cada puerto por identidad USB y texto (udevadm en Linux,
+description+hwid+VID/PID en Windows):
+    - Arduino  -> VID/PID oficial conocido o palabra 'arduino'
     - Lectora  -> honeywell / symbol / aigather / 1a86...
 
 Asignación (§3):
@@ -29,6 +30,14 @@ except Exception:  # noqa: BLE001  # pragma: no cover
 
 log = logging.getLogger("puertos")
 
+# Arduino Uno oficial. Windows puede presentarlo solo como "Dispositivo serie
+# USB", sin la palabra Arduino; VID/PID es la identidad confiable en ese caso.
+VIDPID_ARDUINO = {
+    (0x2341, 0x0043),  # Arduino Uno R3 (Arduino SA)
+    (0x2341, 0x0001),  # Arduino Uno anterior
+    (0x2A03, 0x0043),  # Arduino Uno R3 (Arduino SRL)
+    (0x2A03, 0x0001),  # Arduino Uno anterior (Arduino SRL)
+}
 PALABRAS_ARDUINO = ["arduino"]
 PALABRAS_LECTORA = [
     "honeywell", "symbol", "aigather",
@@ -67,7 +76,9 @@ def _ancla(texto, dev):
     return dev
 
 
-def _clasifica(texto):
+def _clasifica(texto, vid=None, pid=None):
+    if vid is not None and pid is not None and (vid, pid) in VIDPID_ARDUINO:
+        return "arduino"
     t = texto.lower()
     if any(w in t for w in PALABRAS_ARDUINO):
         return "arduino"
@@ -101,7 +112,7 @@ def detectar(anclas=None):
     elif list_ports is not None:  # Windows / fallback
         for p in list_ports.comports():
             texto = f"{p.device} {p.description} {p.hwid}"
-            tipo = _clasifica(texto)
+            tipo = _clasifica(texto, p.vid, p.pid)
             if tipo:
                 candidatos.append((p.device, tipo, p.hwid or p.device))
 

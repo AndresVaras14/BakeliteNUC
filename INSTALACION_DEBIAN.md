@@ -20,6 +20,15 @@ hoy en producción.
 
 ## 1. Paquetes del sistema
 
+La vía recomendada detecta Linux y ejecuta el instalador de Debian/Ubuntu:
+
+```bash
+python3 instalar.py
+```
+
+En Linux `pymssql` no se instala: la aplicación mantiene `pyodbc` con FreeTDS o
+el driver ODBC de Microsoft.
+
 ```bash
 sudo apt update
 sudo apt install -y \
@@ -134,7 +143,7 @@ la app es indistinguible: sigue conectándose a `localhost:1433`.
 Deja Debian solo con la app y apunta `SQL_SERVIDOR` al servidor real.
 
 > **La app funciona sin BD local.** Con `USAR_BD_LOCAL = False` sigue leyendo
-> cédulas, abriendo el torniquete y encolando las marcas en `registros.json`.
+> cédulas, abriendo el torniquete y encolando las marcas en `bakelite_nuc.db`.
 > Pierdes el historial local y la configuración persistente, pero el control de
 > acceso opera. Sirve para levantar el equipo mientras resuelves la base.
 
@@ -248,7 +257,7 @@ En orden. Si uno falla, no sigas al siguiente.
 python3 -c "import tkinter; print('tk', tkinter.TkVersion)"
 
 # 2. Los tres paquetes
-python3 -c "import serial, pyodbc, PIL; print('paquetes ok')"
+python3 -c "import serial, sqlite3, pyodbc, PIL; print('paquetes ok')"
 
 # 3. El driver ODBC
 python3 -c "import pyodbc; print(pyodbc.drivers())"

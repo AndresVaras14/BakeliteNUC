@@ -183,22 +183,23 @@ SQL Server, base `BakeliteTorniquete`, vía pyodbc.
 | `Errores` | **El registro de problemas y hechos relevantes** |
 | `Versiones` | Versión de la aplicación |
 
-**Si la BD no está disponible, la app sigue funcionando.** Las marcas quedan en
-`registros.json` y se reconstruyen al reconectar.
+**Si SQL Server no está disponible, la app sigue funcionando.** Las marcas quedan
+en `bakelite_nuc.db` y se reconstruyen al reconectar.
 
 ---
 
 ## 6. Qué se registra y qué no
 
-Hay **cuatro destinos** distintos y conviene no confundirlos.
+Hay **cinco destinos** distintos y conviene no confundirlos.
 
-### 6.1 Los cuatro destinos
+### 6.1 Los cinco destinos
 
 | Destino | Qué recibe | Rota |
 | --- | --- | --- |
 | `logs/app.log` | Todo desde nivel INFO | 1 MB × 4 |
 | `logs/errores.log` | Solo ERROR y CRITICO | 1 MB × 6 |
 | `logs/debugger.log` | El registro paso a paso del modo debugger | 2 MB × 2 |
+| `bakelite_nuc.db` → `BitacoraAplicacion` | Logging y acciones estructuradas de todos los módulos | configurable; 0 = sin borrado |
 | `dbo.Errores` | **Lo que importa que quede en la base** | no rota |
 
 La consola muestra lo mismo que `app.log`.
@@ -244,8 +245,8 @@ Los cuatro niveles son `INFO`, `WARN`, `ERROR` y `CRITICO`. Cada fila lleva
 | **Fallos de red repetidos** | Se registra el **primero** y luego uno de cada 30 |
 | Un 404 aislado del heartbeat | Hace falta que se repita 3 veces: podría ser la API caída, no un error de configuración |
 
-El criterio es: **a la base va lo que alguien va a querer buscar después**; al
-archivo de log va el detalle para reconstruir un momento puntual.
+El criterio es: **a SQL Server va lo operacional consolidado**; SQLite conserva
+el detalle estructurado local y los archivos permiten una revisión rápida.
 
 ### 6.4 El modo debugger
 
@@ -266,7 +267,7 @@ sirve para revisar lo que pasó antes de abrirlo.
 | Falla | Qué ocurre |
 | --- | --- |
 | **La API no responde** | Las marcas se encolan; el acceso sigue funcionando |
-| **La BD local no responde** | Las marcas quedan en `registros.json` y se reconstruyen al volver |
+| **La BD local no responde** | Las marcas quedan en `bakelite_nuc.db` y se reconstruyen al volver |
 | **La consulta tarda más de 7 s** | Se abandona: "SIN RESPUESTA — VUELVA A INTENTAR" |
 | **Una lectora se desenchufa** | Se detecta en ≤10 s, se informa a Bakelite y la pantalla lo muestra |
 | **Se vuelve a enchufar** | Recupera su número (ancla por zócalo USB) y se limpia el error |

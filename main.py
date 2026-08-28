@@ -17,10 +17,13 @@ import os
 import sys
 import atexit
 import logging
+import platform
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 
 import config
+from bitacora import ManejadorBitacoraSQLite
 from depurador import depurador, ManejadorDepuracion
 import deteccion_puertos
 from ajustes import Ajustes
@@ -40,7 +43,9 @@ def _configurar_logging():
     os.makedirs(config.DIR_LOGS, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S")
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    # DEBUG queda disponible para la bitácora SQLite y el panel de diagnóstico;
+    # consola y archivos aplican sus propios niveles para no llenarse de ruido.
+    root.setLevel(logging.DEBUG)
 
     # Todo lo que la app registra alimenta también el modo debugger, así su
     # panel muestra el detalle fino sin tener que instrumentar cada módulo.
@@ -48,11 +53,13 @@ def _configurar_logging():
 
     consola = logging.StreamHandler()
     consola.setFormatter(fmt)
+    consola.setLevel(logging.INFO)
     root.addHandler(consola)
 
     app = RotatingFileHandler(config.ARCHIVO_LOG, maxBytes=1_000_000, backupCount=3,
                               encoding="utf-8")
     app.setFormatter(fmt)
+    app.setLevel(logging.INFO)
     root.addHandler(app)
 
     err = RotatingFileHandler(config.ARCHIVO_LOG_ERRORES, maxBytes=1_000_000, backupCount=5,
@@ -61,18 +68,55 @@ def _configurar_logging():
     err.setLevel(logging.ERROR)
     root.addHandler(err)
 
+    # Registro estructurado e independiente de SQL Server/Internet. Si el disco
+    # local no permite abrir SQLite, los logs de texto siguen operativos y la
+    # aplicación puede iniciar para mostrar el problema.
+    try:
+        root.addHandler(ManejadorBitacoraSQLite())
+    except Exception:  # noqa: BLE001
+        root.exception("No se pudo activar la bitácora SQLite local.")
+
+
+def _instalar_hooks_excepciones():
+    """Registra fallos que Python normalmente dejaría solo en stderr."""
+    def excepcion_hilo(args):
+        if args.exc_type is SystemExit:
+            return
+        logging.getLogger("errores").critical(
+            "Excepción no controlada en el hilo %s",
+            args.thread.name if args.thread else "desconocido",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    threading.excepthook = excepcion_hilo
+
+    def excepcion_no_observable(args):
+        logging.getLogger("errores").critical(
+            "Excepción no observable%s en %r",
+            f" ({args.err_msg})" if args.err_msg else "",
+            args.object,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    sys.unraisablehook = excepcion_no_observable
+    logging.captureWarnings(True)
+
 
 _configurar_logging()
+_instalar_hooks_excepciones()
 log = logging.getLogger("main")
 
 
 def main():
+    depurador.info("══════════ NUEVA EJECUCIÓN ══════════", origen="sistema")
+    log.info("Entorno de ejecución: %s · Python %s · %s",
+             platform.system(), platform.python_version(), sys.executable)
     validador = Validador(config.ARCHIVO_PERSONAS)
     arduino = Arduino()
     store = RegistroStore()
 
     # BD local (SQL Server / BakeliteTorniquete). Si no está disponible la app
-    # arranca igual: las marcas quedan en la cola JSON y se guardan al reconectar.
+    # arranca igual: las marcas quedan en SQLite y se guardan al reconectar.
     bd_local = BDLocal()
     # La configuración de lectoras y relés vive en la BD; el JSON es respaldo.
     ajustes = Ajustes(bd_local=bd_local)
@@ -267,23 +311,58 @@ def main():
         else:
             log.info("Hardware completo: Arduino + 2 lectoras")
 
+    cerrando = threading.Event()
+
     def cerrar():
+        if cerrando.is_set():
+            return
+        cerrando.set()
+        log.info("Cierre ordenado de la aplicación iniciado.")
         parar_vigilancia.set()
         try:
             sincronizador.detener()
             heartbeat.detener()
             dispositivos.detener()
         except Exception:  # noqa: BLE001
-            pass
+            log.exception("Error deteniendo servicios de segundo plano.")
         for th in hilos.values():
             if th is not None:
                 th.detener()
+        # Esperar primero a quienes pueden seguir usando la cola o la BD. El
+        # límite evita que una petición de red lenta bloquee indefinidamente
+        # el cierre de la ventana.
+        servicios = [sincronizador, heartbeat, dispositivos, hilo_vigilancia]
+        servicios.extend(th for th in hilos.values() if th is not None)
+        limite_cierre = time.monotonic() + 5
+        for servicio in servicios:
+            if servicio.is_alive():
+                servicio.join(timeout=max(0, limite_cierre - time.monotonic()))
+            if servicio.is_alive():
+                log.warning(
+                    "El hilo %s no alcanzó a detenerse antes del cierre.",
+                    servicio.name,
+                )
         arduino.apagar_luz()
         arduino.cerrar()
         try:
             bd_local.cerrar()
         except Exception:  # noqa: BLE001
-            pass
+            log.exception("No se pudo cerrar SQL Server local correctamente.")
+        # El sincronizador es el único servicio que utiliza RegistroStore. Si
+        # aún está terminando una llamada de red, el proceso/SQLite cerrarán su
+        # conexión al salir; cerrarla aquí produciría una carrera y una marca
+        # de error artificial.
+        if not sincronizador.is_alive():
+            try:
+                store.cerrar()
+            except Exception:  # noqa: BLE001
+                log.exception("No se pudo cerrar la cola SQLite correctamente.")
+        else:
+            log.warning(
+                "La cola SQLite queda abierta hasta finalizar el proceso porque "
+                "el sincronizador todavía está cerrando."
+            )
+        log.info("Cierre ordenado de la aplicación completado.")
 
     atexit.register(cerrar)
     ui.root.protocol("WM_DELETE_WINDOW", lambda: (cerrar(), ui.root.destroy()))

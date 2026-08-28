@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-BD local del torniquete: SQL Server (BakeliteTorniquete, esquema dbo) vía pyodbc.
+BD local del torniquete: SQL Server (BakeliteTorniquete, esquema dbo).
+
+Usa pyodbc como cliente principal y pymssql/FreeTDS como respaldo. Este último
+también permite operar en equipos Windows donde Schannel impide que ODBC abra
+la sesión TLS local.
 
 Refleja el flujo real de un acceso:
 
@@ -18,13 +22,14 @@ Todo el SQL vive aquí y va parametrizado con `?` (nunca concatenado). No se usa
 procedimientos almacenados.
 
 Si la BD no está disponible ningún método revienta la app: devuelven None/False,
-lo dejan pendiente en la cola JSON y se reintenta al reconectar.
+lo dejan pendiente en la cola SQLite y se reintenta al reconectar.
 """
 
 import json
 import struct
 import logging
 import datetime
+import sys
 import threading
 from uuid import uuid4
 
@@ -36,6 +41,18 @@ try:
     import pyodbc
 except ImportError:  # el equipo aún no tiene el driver instalado
     pyodbc = None
+
+ES_WINDOWS = sys.platform == "win32"
+
+if ES_WINDOWS:
+    try:
+        import pymssql
+    except ImportError:  # respaldo de Windows cuando ODBC/Schannel no funciona
+        pymssql = None
+else:
+    # En Linux se usa pyodbc con ODBC Driver 18 o FreeTDS (tdsodbc). Evita que
+    # una instalación residual de pymssql cambie accidentalmente el backend.
+    pymssql = None
 
 
 # SQL_SS_TIMESTAMPOFFSET: el tipo DATETIMEOFFSET. Ni FreeTDS ni pyodbc lo
@@ -78,6 +95,10 @@ def elegir_driver():
         return config.SQL_DRIVER
 
     instalados = drivers_disponibles()
+    for version in (18, 17):
+        preferido = f"ODBC Driver {version} for SQL Server"
+        if preferido in instalados:
+            return preferido
     for d in instalados:
         if "ODBC Driver" in d and "SQL Server" in d:
             return d
@@ -113,6 +134,21 @@ def cadena_conexion(driver=None):
     return ";".join(partes) + ";"
 
 
+class _CursorPymssql:
+    """Adapta pymssql al estilo de parámetros ``?`` usado por pyodbc."""
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def execute(self, consulta, *parametros):
+        consulta = consulta.replace("?", "%s")
+        self._cursor.execute(consulta, tuple(parametros))
+        return self
+
+    def __getattr__(self, nombre):
+        return getattr(self._cursor, nombre)
+
+
 class BDLocal:
     """BD local en SQL Server. Reconecta sola y nunca propaga excepciones."""
 
@@ -120,6 +156,7 @@ class BDLocal:
         self.cadena = cadena or cadena_conexion()
         self._lock = threading.RLock()
         self._con = None
+        self._backend = None
         self.disponible = False
         self.ultimo_error = None
         self.conectar()
@@ -127,33 +164,68 @@ class BDLocal:
     # ================= Conexión =================
     def conectar(self):
         """Abre la conexión. Devuelve True si quedó utilizable."""
-        if pyodbc is None:
-            self.ultimo_error = ("pyodbc no está instalado "
-                                 "(sudo apt install python3-pyodbc)")
-            log.error("BD local no disponible: %s", self.ultimo_error)
-            return False
-        if not drivers_disponibles():
-            self.ultimo_error = ("no hay ningún driver ODBC instalado "
-                                 "(sudo apt install unixodbc tdsodbc)")
-            log.error("BD local no disponible: %s", self.ultimo_error)
-            return False
         with self._lock:
             self._cerrar_silencioso()
-            try:
-                self._con = pyodbc.connect(self.cadena, autocommit=False,
-                                           timeout=config.SQL_TIMEOUT_CONEXION)
-                self._con.timeout = config.SQL_TIMEOUT_CONSULTA
-                self._con.add_output_converter(SQL_TIMESTAMPOFFSET, _leer_datetimeoffset)
-                self.disponible = True
-                self.ultimo_error = None
-                log.info("Conectado a %s en %s", config.SQL_BASE, config.SQL_SERVIDOR)
-                return True
-            except Exception as e:  # noqa: BLE001
-                self._con = None
-                self.disponible = False
-                self.ultimo_error = str(e)
-                log.error("No se pudo conectar a la BD local: %s", e)
-                return False
+            errores = []
+
+            if pyodbc is not None and drivers_disponibles():
+                try:
+                    self._con = pyodbc.connect(
+                        self.cadena, autocommit=False,
+                        timeout=config.SQL_TIMEOUT_CONEXION)
+                    self._con.timeout = config.SQL_TIMEOUT_CONSULTA
+                    self._con.add_output_converter(
+                        SQL_TIMESTAMPOFFSET, _leer_datetimeoffset)
+                    self._backend = "pyodbc"
+                    return self._conexion_lista()
+                except Exception as e:  # noqa: BLE001
+                    errores.append(f"ODBC: {e}")
+                    self._con = None
+                    if ES_WINDOWS and pymssql is not None:
+                        log.warning("ODBC no pudo conectar; probando pymssql: %s", e)
+                    else:
+                        log.warning("ODBC no pudo conectar: %s", e)
+            elif pyodbc is None:
+                errores.append("pyodbc no está instalado")
+            else:
+                errores.append("no hay ningún driver ODBC instalado")
+
+            if ES_WINDOWS and pymssql is not None and not config.SQL_TRUSTED:
+                try:
+                    self._con = pymssql.connect(
+                        server=config.SQL_SERVIDOR,
+                        user=config.SQL_USUARIO,
+                        password=config.SQL_CLAVE,
+                        database=config.SQL_BASE,
+                        port=str(config.SQL_PUERTO),
+                        login_timeout=config.SQL_TIMEOUT_CONEXION,
+                        timeout=config.SQL_TIMEOUT_CONSULTA,
+                        charset="UTF-8",
+                        tds_version="7.4",
+                        autocommit=False,
+                    )
+                    self._backend = "pymssql"
+                    return self._conexion_lista()
+                except Exception as e:  # noqa: BLE001
+                    errores.append(f"pymssql: {e}")
+                    self._con = None
+            elif ES_WINDOWS and pymssql is None:
+                errores.append("pymssql no está instalado")
+            elif ES_WINDOWS:
+                errores.append("pymssql no admite SQL_TRUSTED")
+
+            self._backend = None
+            self.disponible = False
+            self.ultimo_error = " | ".join(errores)
+            log.error("No se pudo conectar a la BD local: %s", self.ultimo_error)
+            return False
+
+    def _conexion_lista(self):
+        self.disponible = True
+        self.ultimo_error = None
+        log.info("Conectado a %s en %s mediante %s",
+                 config.SQL_BASE, config.SQL_SERVIDOR, self._backend)
+        return True
 
     def cerrar(self):
         with self._lock:
@@ -164,9 +236,10 @@ class BDLocal:
         if self._con is not None:
             try:
                 self._con.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                log.debug("Error cerrando la conexión %s: %s", self._backend, e)
             self._con = None
+            self._backend = None
 
     def _ejecutar(self, fn, descripcion):
         """Corre `fn(cursor)` dentro de una transacción. Reintenta una vez si la
@@ -178,6 +251,8 @@ class BDLocal:
                 cur = None
                 try:
                     cur = self._con.cursor()
+                    if self._backend == "pymssql":
+                        cur = _CursorPymssql(cur)
                     res = fn(cur)
                     self._con.commit()
                     self.disponible = True
@@ -185,10 +260,19 @@ class BDLocal:
                 except Exception as e:  # noqa: BLE001
                     try:
                         self._con.rollback()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    caida = pyodbc is not None and isinstance(
-                        e, (pyodbc.OperationalError, pyodbc.InterfaceError))
+                    except Exception as rollback_error:  # noqa: BLE001
+                        log.debug("Rollback falló durante %s: %s",
+                                  descripcion, rollback_error)
+                    caida = (
+                        self._backend == "pyodbc"
+                        and pyodbc is not None
+                        and isinstance(e, (pyodbc.OperationalError,
+                                           pyodbc.InterfaceError))
+                    ) or (
+                        self._backend == "pymssql"
+                        and pymssql is not None
+                        and isinstance(e, pymssql.Error)
+                    )
                     if caida and intento == 1:
                         log.warning("Conexión perdida en %s, reconectando...", descripcion)
                         self.conectar()
@@ -202,8 +286,9 @@ class BDLocal:
                     if cur is not None:
                         try:
                             cur.close()
-                        except Exception:  # noqa: BLE001
-                            pass
+                        except Exception as cierre_error:  # noqa: BLE001
+                            log.debug("No se pudo cerrar cursor de %s: %s",
+                                      descripcion, cierre_error)
         return False, None
 
     # ================= Paso 1: la cédula pasó por la lectora =================
@@ -366,7 +451,7 @@ class BDLocal:
                 "    EstadoApi = COALESCE(?, EstadoApi), "
                 "    IdMarcaApi = COALESCE(?, IdMarcaApi) "
                 "WHERE IdMarca = ?",
-                request_json, _corta(url or config.API_URL, 300), http_status,
+                request_json, _corta(url or config.ENDPOINT_REGISTRAR_EVENTO, 300), http_status,
                 respuesta_json, _corta(mensaje_error, 1000), duracion_ms,
                 exito, exito, exito, http_status, estado_api, id_marca_api, id_marca)
 
@@ -379,7 +464,7 @@ class BDLocal:
                     "VALUES (?,?,?,1, SYSDATETIME(), SYSDATETIME(), ?,?,?,?,?, "
                     "        CASE WHEN ? = 1 THEN SYSDATETIME() END, "
                     "        CASE WHEN ? = 1 THEN ? END, ?, ?)",
-                    id_marca, _corta(url or config.API_URL, 300), request_json,
+                    id_marca, _corta(url or config.ENDPOINT_REGISTRAR_EVENTO, 300), request_json,
                     http_status, respuesta_json, _corta(mensaje_error, 1000), duracion_ms,
                     exito, exito, exito, http_status, estado_api, id_marca_api)
 
@@ -573,7 +658,7 @@ class BDLocal:
         return bool(ok and res)
 
     def recuperar_marca(self, ev):
-        """Rehace en la BD una marca que quedó solo en la cola JSON porque la BD
+        """Rehace en la BD una marca que quedó solo en la cola SQLite porque la BD
         estaba caída cuando se pasó la cédula. Idempotente por IdEvento.
 
         Respeta lo que ya pasó: si la marca alcanzó a entregarse a Bakelite

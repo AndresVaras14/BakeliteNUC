@@ -8,7 +8,13 @@
       "program": "${workspaceFolder}/main.py",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "justMyCode": true
+      "justMyCode": true,
+      "windows": {
+        "python": "${env:LOCALAPPDATA}\\Programs\\Python\\Python314\\python.exe"
+      },
+      "linux": {
+        "python": "/usr/bin/python3"
+      }
     },
     {
       "name": "BAKELITE — Supervisor (auto-reinicio)",
@@ -17,7 +23,13 @@
       "program": "${workspaceFolder}/supervisor.py",
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
-      "justMyCode": true
+      "justMyCode": true,
+      "windows": {
+        "python": "${env:LOCALAPPDATA}\\Programs\\Python\\Python314\\python.exe"
+      },
+      "linux": {
+        "python": "/usr/bin/python3"
+      }
     }
   ]
 }

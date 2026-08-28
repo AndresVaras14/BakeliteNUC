@@ -47,22 +47,22 @@ class Heartbeat(threading.Thread):
         self.estado = None                # último estado que informó la API
         self.intervalo = config.HEARTBEAT_INTERVALO_SEGUNDOS
         self.detenido_por_inactivo = False
-        self._stop = threading.Event()
+        self._detener_evento = threading.Event()
         self._fallos = 0                  # fallos seguidos, para no llenar el log
         self._404_seguidos = 0            # ver _es_config_rota()
         self._avisado = False             # ¿hay un cartel en pantalla?
 
     def detener(self):
-        self._stop.set()
+        self._detener_evento.set()
 
     @property
     def url(self):
-        return config.API_URL_HEARTBEAT.format(id=config.ID_TERMINAL)
+        return config.ENDPOINT_HEARTBEAT_TERMINAL.format(id=config.ID_TERMINAL)
 
     def run(self):
         # Al iniciar se manda de inmediato: el contrato pide que la web vea la
         # conexión sin esperar el primer ciclo.
-        while not self._stop.is_set():
+        while not self._detener_evento.is_set():
             comienzo = time.monotonic()
             try:
                 espera = self._latir()
@@ -75,7 +75,7 @@ class Heartbeat(threading.Thread):
             # no 10. Así el ritmo es de verdad uno cada `intervalo` segundos y
             # no se acumulan peticiones atrasadas.
             resto = max(0.0, espera - (time.monotonic() - comienzo))
-            self._stop.wait(timeout=resto)
+            self._detener_evento.wait(timeout=resto)
 
     def _latir(self):
         """Manda un heartbeat. Devuelve cuántos segundos esperar, o None si hay
@@ -99,6 +99,7 @@ class Heartbeat(threading.Thread):
             return self.intervalo
 
     def _aceptado(self, cuerpo):
+        log.debug("Heartbeat aceptado por Bakelite: %s", cuerpo[:500])
         if self._fallos:
             log.info("Presencia restablecida tras %d intentos fallidos.", self._fallos)
         self._fallos = 0
@@ -106,8 +107,8 @@ class Heartbeat(threading.Thread):
         datos = {}
         try:
             datos = json.loads(cuerpo) if cuerpo else {}
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            log.warning("Heartbeat respondió JSON inválido: %s (%s)", cuerpo[:500], e)
 
         # El ritmo lo manda la API, no este archivo: si algún día cambia el
         # intervalo, el terminal lo adopta solo.

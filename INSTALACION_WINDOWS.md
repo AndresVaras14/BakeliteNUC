@@ -17,6 +17,13 @@ final del sistema es Linux; esto es solo el entorno de trabajo.
 
 ## 1. Lo que SÍ hay que instalar
 
+Para detectar Windows, usar el Python actual e instalar/verificar todo con el
+flujo correcto, ejecuta desde la carpeta del proyecto:
+
+```bat
+python instalar.py
+```
+
 ### 1.1 Python
 
 Descarga **Python 3.11 o superior** de [python.org](https://www.python.org/downloads/windows/).
@@ -81,7 +88,9 @@ Desde la carpeta del proyecto:
 python -m pip install -r requirements.txt
 ```
 
-Son tres: `pyserial`, `pyodbc` y `Pillow`.
+En Windows instala `pyserial`, `pyodbc`, `Pillow` y el respaldo `pymssql`.
+Este último solo entra en uso automáticamente si ODBC/Schannel no logra abrir
+la conexión local.
 
 ### 1.5 Drivers de los aparatos
 
@@ -154,7 +163,7 @@ salvo estos casos:
 | SQL Server está en otra máquina o instancia | `SQL_SERVIDOR` (ej. `"localhost\\SQLEXPRESS"`) |
 | Usaste otra clave para `userBakelite` | `SQL_CLAVE`, y la del script |
 | Quieres probar sin tocar la API real | `SIMULAR_API = True` |
-| No tienes SQL Server a mano | `USAR_BD_LOCAL = False` — la app funciona, encolando en `registros.json` |
+| No tienes SQL Server a mano | `USAR_BD_LOCAL = False` — la app funciona, encolando en `bakelite_nuc.db` |
 
 También se pueden usar variables de entorno, que ganan sobre `config.py`:
 
@@ -261,7 +270,7 @@ En orden. Si uno falla, no sigas al siguiente.
 python -c "import tkinter; print('tk', tkinter.TkVersion)"
 
 :: 2. Los tres paquetes
-python -c "import serial, pyodbc, PIL; print('paquetes ok')"
+python -c "import serial, sqlite3, pyodbc, PIL; print('paquetes ok')"
 
 :: 3. El driver ODBC
 python -c "import pyodbc; print(pyodbc.drivers())"

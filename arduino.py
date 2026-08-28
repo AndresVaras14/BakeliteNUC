@@ -115,6 +115,6 @@ class Arduino:
         if self.ser is not None:
             try:
                 self.ser.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                log.debug("No se pudo cerrar el puerto Arduino %s: %s", self.puerto, e)
         self.ser = None

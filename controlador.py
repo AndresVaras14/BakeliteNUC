@@ -189,11 +189,11 @@ class Controlador:
             try:
                 self.bd_local.registrar_error("controlador", msg, nivel="ERROR")
             except Exception:  # noqa: BLE001
-                pass
+                log.exception("No se pudo registrar la liberación forzada de la lectora.")
         try:
             self.arduino.apagar_luz()
         except Exception:  # noqa: BLE001
-            pass
+            log.exception("No se pudo apagar la luz tras liberar la lectora.")
         if self.ui:
             self.ui.mostrar_esperando()
         return False

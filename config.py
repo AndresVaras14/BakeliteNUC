@@ -115,7 +115,16 @@ LOGO_SOPYTEC_ALTO = 26       # píxeles de alto en el pie
 
 # ===== ARCHIVOS DE ESTADO / REGISTROS =====
 ARCHIVO_AJUSTES = ruta("ajustes.json")
-ARCHIVO_REGISTROS = ruta("registros.json")      # JSON con todo lo que se hace (con flags)
+# SQLite viene incluido con Python en Windows y Linux. Esta base guarda la cola
+# transaccional de marcas y la bitácora estructurada de toda la aplicación.
+ARCHIVO_SQLITE_LOCAL = ruta("bakelite_nuc.db")
+# Fuente anterior. Si existe, se importa automáticamente a SQLite y se conserva
+# renombrada como respaldo; la aplicación ya no vuelve a escribirla.
+ARCHIVO_REGISTROS_JSON_LEGACY = ruta("registros.json")
+SQLITE_BUSY_TIMEOUT_MS = 10_000
+# 0 conserva toda la bitácora. Puede configurarse más adelante si el espacio en
+# disco del NUC exige una política de retención explícita.
+BITACORA_RETENCION_DIAS = 0
 DIR_LOGS = ruta("logs")
 ARCHIVO_LOG = os.path.join(DIR_LOGS, "app.log")
 ARCHIVO_LOG_ERRORES = os.path.join(DIR_LOGS, "errores.log")
@@ -129,7 +138,7 @@ DEBUG_MAX_BYTES = 2_000_000          # al pasarse, se conserva una copia .1
 DEBUG_LINEAS_HISTORIAL = 800         # cuántas se muestran al abrir el panel
 
 # ===== SINCRONIZACIÓN (BD local + API) =====
-# Cada marca (acceso autorizado/rechazado) se guarda en el JSON (cola local) con
+# Cada marca (acceso autorizado/rechazado) se guarda en SQLite (cola local) con
 # subido_local=0 y subido_api=0, y el sincronizador la sube a la BD local
 # (SQL Server) y a la API de Bakelite (contrato). Lo que quede en 0 se reintenta con espera
 # incremental. Ver CONTRATO_INTEGRACION_TORNIQUETE.md.
@@ -168,20 +177,22 @@ SQL_TIMEOUT_CONSULTA = 15    # segundos por consulta
 
 # API oficial de Bakelite (contrato de integración).
 API_BASE = "https://bakeliteapi.sopytec.cl/"
-API_URL = "https://bakeliteapi.sopytec.cl/api/terminal/events"
+# Catálogo único de endpoints. Fuera de este archivo el código usa siempre el
+# nombre del endpoint y nunca vuelve a escribir ni a completar una ruta HTTP.
+ENDPOINT_REGISTRAR_EVENTO = f"{API_BASE}api/terminal/events"
 API_TIMEOUT_SEGUNDOS = 10
 # Aviso de cortes de conexión: "hubo un corte desde las XX, recuperado a las XX".
 # Mientras esté vacío, los cortes se guardan en dbo.IncidentesConexion con
 # EstadoEnvio = 'PENDIENTE' y se informan solos en cuanto se defina la URL.
 # Estado de la API en tiempo real (health check). Contrato en
 # CONTRATO_ENDPOINTS_PENDIENTES.md: 200 con baseDatos "OK" = hay conexión.
-API_URL_PING = "https://bakeliteapi.sopytec.cl/api/terminal/health"
-API_URL_INCIDENTES = "https://bakeliteapi.sopytec.cl/api/terminal/incidents"
+ENDPOINT_ESTADO_API = f"{API_BASE}api/terminal/health"
+ENDPOINT_REGISTRAR_INCIDENTE = f"{API_BASE}api/terminal/incidents"
 
 # Datos del terminal en Bakelite. Se consulta para verificar que el idTerminal
 # existe y está activo. El NOMBRE ya no se gobierna desde aquí: se sincroniza
 # en ambos sentidos (ver más abajo).
-API_URL_TERMINAL = "https://bakeliteapi.sopytec.cl/api/terminal"
+ENDPOINT_OBTENER_TERMINAL = f"{API_BASE}api/terminal/{{id}}"
 ID_TERMINAL = 1             # idTerminal asignado a este torniquete (contrato)
 
 # Tope de seguridad: cuánto puede estar una lectora "ocupada" antes de que se
@@ -196,7 +207,7 @@ OCUPADA_MAX_SEGUNDOS = 30
 # que el heartbeat llegue no significa que las lectoras o el Arduino funcionen.
 # La API sella con SU reloj y decide el estado; aquí solo se avisa.
 # Contrato: CONTRATO_DISPONIBILIDAD_SOFTWARE_ESCRITORIO.md
-API_URL_HEARTBEAT = "https://bakeliteapi.sopytec.cl/api/terminal/{id}/heartbeat"
+ENDPOINT_HEARTBEAT_TERMINAL = f"{API_BASE}api/terminal/{{id}}/heartbeat"
 # Valores por defecto. La API los devuelve en cada respuesta y mandan los suyos:
 # estos solo se usan hasta el primer heartbeat aceptado.
 HEARTBEAT_INTERVALO_SEGUNDOS = 10
@@ -210,7 +221,7 @@ HEARTBEAT_ESPERA_ERROR_SEGUNDOS = 60
 # El terminal manda la foto completa de sus dispositivos —cómo están
 # configurados y en qué estado están— y recibe de vuelta lo que en Bakelite sea
 # más reciente. Contrato: CONTRATO_DISPOSITIVOS_TERMINAL.md
-API_URL_DISPOSITIVOS = "https://bakeliteapi.sopytec.cl/api/terminal/{id}/dispositivos/sincronizar"
+ENDPOINT_SINCRONIZAR_DISPOSITIVOS = f"{API_BASE}api/terminal/{{id}}/dispositivos/sincronizar"
 # Valor por defecto: la API manda el suyo en sincronizarCadaSegundos y ese gana.
 DISPOSITIVOS_INTERVALO_SEGUNDOS = 10
 DISPOSITIVOS_TIMEOUT_SEGUNDOS = 10
@@ -224,9 +235,9 @@ DISPOSITIVOS_ESPERA_ERROR_SEGUNDOS = 60
 # (NombreFecha) y esa hora es el único criterio de desempate.
 # Contrato: CONTRATO_SINCRONIZACION_NOMBRE_TERMINAL.md
 # {id} se reemplaza por ID_TERMINAL.
-API_URL_NOMBRE_COMPARAR = "https://bakeliteapi.sopytec.cl/api/terminal/{id}/nombre-terminal/comparar"
-API_URL_NOMBRE_HACIA_NUC = "https://bakeliteapi.sopytec.cl/api/terminal/{id}/nombre-terminal/hacia-nuc"
-API_URL_NOMBRE_DESDE_NUC = "https://bakeliteapi.sopytec.cl/api/terminal/{id}/nombre-terminal/desde-nuc"
+ENDPOINT_COMPARAR_NOMBRE_TERMINAL = f"{API_BASE}api/terminal/{{id}}/nombre-terminal/comparar"
+ENDPOINT_OBTENER_NOMBRE_TERMINAL = f"{API_BASE}api/terminal/{{id}}/nombre-terminal/hacia-nuc"
+ENDPOINT_ACTUALIZAR_NOMBRE_TERMINAL = f"{API_BASE}api/terminal/{{id}}/nombre-terminal/desde-nuc"
 # Cada cuánto se compara el nombre con Bakelite. Va más espaciado que el resto
 # a propósito: la comparación no escribe nada y el nombre cambia cada varios
 # meses, así que sondearlo cada 10 s serían 8.640 llamadas diarias para nada.

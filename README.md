@@ -28,16 +28,16 @@ serie, extrae el RUT, valida el acceso y responde al relé y al semáforo.
   amarillo=sin conexión), con una leyenda que explica cada color.
 - **Anti-doble-lectura**: tras leer un carnet, ignora nuevas lecturas de esa
   lectora durante 2 s (`LECTURA_COOLDOWN_SEGUNDOS`), para no mandar dos consultas.
-- **RUT enmascarado** en pantalla (`4.266.307-7`); en la BD/JSON se guarda sin formato.
+- **RUT enmascarado** en pantalla (`4.266.307-7`); localmente se conserva para sincronizar.
 - **Estado en línea** en el pie: luz **verde** (en línea) / **roja** (sin conexión)
   y la **hora de la última conexión** al servidor.
-- **Registro de todo en JSON** (`registros.json`) con dos banderas por evento:
-  `subido_local` y `subido_api` (0/1); se sube a la **BD local** (SQLite) y a la
-  **API**, y lo que quede en 0 se reintenta. Ver *Registros y sincronización*.
+- **Cola transaccional SQLite** (`bakelite_nuc.db`) con dos banderas por evento:
+  `subido_local` y `subido_api`; se sube a **SQL Server local** y a la **API**, y
+  lo que quede pendiente se reintenta. La misma base guarda la bitácora completa.
 - **Ubicación del torniquete** configurable (en ⚙ Ajustes), se muestra en el pie.
 - **Pantalla de estado de conexión** (botón 🔌 Estado): muestra si falta
-  conectar alguna lectora o el Arduino, con botón **Volver a detectar**. Se abre
-  sola al arrancar si falta hardware, y aparece un aviso en la pantalla principal.
+  conectar alguna lectora o el Arduino, con botón **Volver a detectar**. No
+  interrumpe el arranque; si falta hardware aparece un aviso en la pantalla principal.
 - **Botón ⚙ Ajustes** (o tecla `F2`) para **invertir lectoras** y/o **relés**
   cuando quedan al revés, con botones para **probar cada torniquete** y
   **probar las luces**, y para fijar la **ubicación**. Se guarda en `ajustes.json`.
@@ -69,10 +69,16 @@ serie, extrae el RUT, valida el acceso y responde al relé y al semáforo.
 ## Requisitos
 
 - Python 3.8+
-- `pyserial` (para el hardware real):
+- Instalación automática recomendada (detecta Windows o Linux):
   ```bash
-  pip install -r requirements.txt
+  python instalar.py
   ```
+- Solo verificar sin modificar:
+  ```bash
+  python instalar.py --verificar
+  ```
+- `requirements.txt` usa marcadores de plataforma: instala `pymssql` como
+  respaldo únicamente en Windows; Linux usa `pyodbc` con ODBC/FreeTDS.
 - Tkinter (en Linux puede requerir el paquete del sistema):
   ```bash
   sudo apt install python3-tk
@@ -147,8 +153,8 @@ Botón **🔌 Estado** (abajo a la derecha). Lista los tres dispositivos que el
 sistema necesita —**Lectora 1 (entrada)**, **Lectora 2 (salida)** y **Arduino
 (relés + luces)**— con su estado CONECTADO / NO CONECTADO. El botón **Volver a
 detectar** vuelve a escanear los puertos y conecta lo que aparezca, sin reiniciar
-la app. Si al arrancar falta algo, esta pantalla se abre sola y en la parte
-central aparece un aviso “⚠ Falta conectar…”.
+la app. Si al arrancar falta algo, la pantalla de estado no se abre sola; en la
+pantalla principal aparece el aviso “⚠ Falta conectar…” y puede abrirse manualmente.
 
 ## Ajustes: invertir lectoras / relés
 
@@ -167,10 +173,10 @@ etc.). Todo se guarda en `ajustes.json` y se aplica al instante.
 
 ## Registros y sincronización
 
-Cada acceso (autorizado o denegado) se guarda en **`registros.json`** con dos
-banderas:
+Cada acceso (autorizado o denegado) se guarda en **`bakelite_nuc.db`**, tabla
+`ColaEventos`, con dos banderas:
 
-```json
+```text
 { "id": 1, "id_evento": "b5fcccc5…", "rut": "042663077",
   "nombre": "Laura Sofía Gómez", "sentido": "E", "codigo": 1, "autorizado": true,
   "ubicacion": "Torniquete Norte", "subido_local": 0, "subido_api": 0,
@@ -180,13 +186,18 @@ banderas:
 ```
 
 Además, cada marca lleva un **`idEvento` (UUID)** único y su **payload completo**
-guardado en el JSON *antes* de enviarse (cola local, según el contrato).
+guardado en SQLite *antes* de enviarse (cola local, según el contrato).
 
 El **sincronizador** (hilo en segundo plano) toma los que están en 0 y los sube:
 
-- **BD local** → SQLite real (`registros_local.db`). Al insertarlo, `subido_local = 1`.
+- **BD local** → SQL Server (`BakeliteTorniquete`). Al insertarlo, `subido_local = 1`.
 - **API de Bakelite** → `POST https://bakeliteapi.sopytec.cl/api/terminal/events`
   con el payload del contrato ([CONTRATO_INTEGRACION_TORNIQUETE.md](CONTRATO_INTEGRACION_TORNIQUETE.md)).
+
+La tabla `BitacoraAplicacion` recibe los logs y acciones relevantes de todos los
+módulos, con fecha, nivel, origen, hilo, proceso, archivo, función, línea y
+excepción. `registros.json`, si existe al actualizar una instalación anterior,
+se importa una sola vez y se conserva como `registros.json.migrado-*.bak`.
   Se envía el mismo `idEvento` en cada reintento (idempotencia).
 
 Manejo de respuestas (contrato):
