@@ -31,6 +31,7 @@ import urllib.error
 from uuid import uuid4
 
 import config
+import terminal_auth
 from depurador import depurador
 
 log = logging.getLogger("dispositivos")
@@ -129,7 +130,8 @@ class SincronizadorDispositivos(threading.Thread):
         try:
             peticion = urllib.request.Request(
                 self.url, data=json.dumps(cuerpo, ensure_ascii=False).encode("utf-8"),
-                method="POST", headers={"Content-Type": "application/json"})
+                method="POST",
+                headers=terminal_auth.cabeceras({"Content-Type": "application/json"}))
             with urllib.request.urlopen(
                     peticion, timeout=config.DISPOSITIVOS_TIMEOUT_SEGUNDOS) as resp:
                 datos = json.loads(resp.read().decode("utf-8", "ignore") or "{}")

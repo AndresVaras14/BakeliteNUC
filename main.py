@@ -30,6 +30,7 @@ from ajustes import Ajustes
 from presencia import Heartbeat
 from dispositivos import SincronizadorDispositivos
 from validador import Validador
+from validador_api_externa import ValidadorApiExterna
 from arduino import Arduino
 from lectora import LectoraThread
 from controlador import Controlador
@@ -111,7 +112,12 @@ def main():
     depurador.info("══════════ NUEVA EJECUCIÓN ══════════", origen="sistema")
     log.info("Entorno de ejecución: %s · Python %s · %s",
              platform.system(), platform.python_version(), sys.executable)
-    validador = Validador(config.ARCHIVO_PERSONAS)
+    if config.USAR_API_EXTERNA_RUT:
+        validador = ValidadorApiExterna()
+        log.info("Validación de RUT: API externa INNTEK/ASEM.")
+    else:
+        validador = Validador(config.ARCHIVO_PERSONAS)
+        log.info("Validación de RUT: personas.json (modo prueba).")
     arduino = Arduino()
     store = RegistroStore()
 

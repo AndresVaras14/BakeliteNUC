@@ -6,3 +6,8 @@ registros.json
 registros.json.tmp
 registros_local.db
 ajustes.json
+credenciales_api_externa.json
+clave_terminal.json
+identidad_terminal.json
+numero_torniquete.bloqueado
+clave_aprovisionamiento.json

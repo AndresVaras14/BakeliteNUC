@@ -26,6 +26,7 @@ import urllib.error
 import json
 
 import config
+import terminal_auth
 from depurador import depurador
 
 log = logging.getLogger("presencia")
@@ -80,7 +81,8 @@ class Heartbeat(threading.Thread):
     def _latir(self):
         """Manda un heartbeat. Devuelve cuántos segundos esperar, o None si hay
         que dejar de latir para siempre."""
-        peticion = urllib.request.Request(self.url, data=b"", method="POST")
+        peticion = urllib.request.Request(
+            self.url, data=b"", method="POST", headers=terminal_auth.cabeceras())
         try:
             with urllib.request.urlopen(
                     peticion, timeout=config.HEARTBEAT_TIMEOUT_SEGUNDOS) as resp:

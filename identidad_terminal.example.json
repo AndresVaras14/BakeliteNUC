@@ -1,0 +1,6 @@
+{
+  "numero_torniquete": 1,
+  "direccion_api": "https://bakeliteapi.sopytec.cl/",
+  "nombre": "Torniquete Principal",
+  "ubicacion": "Acceso principal"
+}

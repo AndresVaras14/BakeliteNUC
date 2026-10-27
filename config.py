@@ -7,6 +7,8 @@ Cambiar aquí y nada más para reconfigurar el equipo.
 
 import os
 
+import identidad_terminal
+
 # Carpeta del proyecto: todas las rutas se resuelven aquí, así la app funciona
 # sin importar desde dónde se lance (terminal, VS Code, supervisor...).
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -104,6 +106,23 @@ ARCHIVO_PERSONAS = ruta("personas.json")
 # de verdad. Se deja en 0; súbelo solo si quieres volver a simular demora.
 VALIDACION_DELAY_SIMULADO = 0.0
 
+# ===== VALIDACIÓN POR LA API EXTERNA (INNTEK/ASEM) =====
+# Contrato: "Manual de Usuario API Inntek Bakelite 1.1.pdf". Esta API SOLO
+# responde si un RUT está habilitado o no (estado 1/0 + motivo); no reemplaza
+# a la API propia de Bakelite (marcas, heartbeat, dispositivos: ver más abajo).
+ASEM_API_BASE = "https://api.asem.cl"
+ASEM_ENDPOINT_LOGIN = f"{ASEM_API_BASE}/api/principal/89/WS_ValidaUsuarioOVALASEM"
+ASEM_ENDPOINT_CONSULTA = f"{ASEM_API_BASE}/api/WS_ConsultaTrabajadorBakelite"
+ASEM_API_TIMEOUT_SEGUNDOS = 5
+# user/passwd/rut de la empresa principal: NUNCA se hardcodean aquí (son del
+# cliente). Viven en credenciales_api_externa.json, que está en .gitignore;
+# ver credenciales_api_externa.example.json para el formato.
+ARCHIVO_CREDENCIALES_API_EXTERNA = ruta("credenciales_api_externa.json")
+# Interruptor para las pruebas: en True (por defecto) main.py arranca con
+# ValidadorApiExterna; BAKELITE_USAR_API_EXTERNA_RUT=0 vuelve a personas.json
+# sin tocar código, por si hace falta probar sin la API real.
+USAR_API_EXTERNA_RUT = os.environ.get("BAKELITE_USAR_API_EXTERNA_RUT", "1") == "1"
+
 # ===== LOGOS =====
 # Carpeta con los logos de marca. El de Bakelite viene en azul oscuro (pensado
 # para fondos blancos), así que la interfaz lo recolorea para el fondo oscuro.
@@ -175,11 +194,22 @@ SQL_TRUST_CERT = True        # instancia local con certificado autofirmado
 SQL_TIMEOUT_CONEXION = 5     # segundos para abrir la conexión
 SQL_TIMEOUT_CONSULTA = 15    # segundos por consulta
 
-# API oficial de Bakelite (contrato de integración).
-API_BASE = "https://bakeliteapi.sopytec.cl/"
+# Clave que identifica a este terminal ante /api/terminal/* de Bakelite (ver
+# terminal_auth.py). Archivo local, en .gitignore -- nunca en el repositorio.
+ARCHIVO_CLAVE_TERMINAL = ruta("clave_terminal.json")
+# Clave compartida de aprovisionamiento: solo se usa UNA vez, cuando este
+# terminal todavía no tiene clave_terminal.json, para autoregistrarse en
+# Bakelite (ver terminal_auth.py). También gitignored.
+ARCHIVO_CLAVE_APROVISIONAMIENTO = ruta("clave_aprovisionamiento.json")
+
+# API oficial de Bakelite (contrato de integración). El valor real viene de
+# identidad_terminal.json (ver identidad_terminal.py) -- este archivo nunca
+# vuelve a escribir una URL a mano, solo arma rutas a partir de ella.
+API_BASE = identidad_terminal.DIRECCION_API
 # Catálogo único de endpoints. Fuera de este archivo el código usa siempre el
 # nombre del endpoint y nunca vuelve a escribir ni a completar una ruta HTTP.
 ENDPOINT_REGISTRAR_EVENTO = f"{API_BASE}api/terminal/events"
+ENDPOINT_ENROLAR_TERMINAL = f"{API_BASE}api/terminal/enroll"
 API_TIMEOUT_SEGUNDOS = 10
 # Aviso de cortes de conexión: "hubo un corte desde las XX, recuperado a las XX".
 # Mientras esté vacío, los cortes se guardan en dbo.IncidentesConexion con
@@ -193,7 +223,10 @@ ENDPOINT_REGISTRAR_INCIDENTE = f"{API_BASE}api/terminal/incidents"
 # existe y está activo. El NOMBRE ya no se gobierna desde aquí: se sincroniza
 # en ambos sentidos (ver más abajo).
 ENDPOINT_OBTENER_TERMINAL = f"{API_BASE}api/terminal/{{id}}"
-ID_TERMINAL = 1             # idTerminal asignado a este torniquete (contrato)
+# idTerminal asignado a este torniquete (contrato). Viene de
+# identidad_terminal.json y queda bloqueado tras el primer arranque exitoso
+# -- ver identidad_terminal.py.
+ID_TERMINAL = identidad_terminal.NUMERO_TORNIQUETE
 
 # Tope de seguridad: cuánto puede estar una lectora "ocupada" antes de que se
 # la libere por la fuerza. El trámite normal ya tiene sus propios topes (7 s de

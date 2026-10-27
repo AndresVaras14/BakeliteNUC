@@ -41,11 +41,19 @@ def fn_enmascara_rut(trama):
 
 
 def formatea_rut(norm):
-    """Presenta un RUT normalizado como '4.266.307-7' para pantalla."""
-    if not norm or norm == "0":
+    """Presenta cualquier RUT como ``4.266.307-7``, nunca ``04.266.307-7``.
+
+    Es una transformación exclusivamente visual: ``normaliza_rut`` mantiene
+    los nueve caracteres usados internamente y en la base de datos.
+    """
+    limpio = "".join(
+        caracter for caracter in str(norm or "").upper()
+        if caracter.isdigit() or caracter == "K"
+    )
+    if len(limpio) < 2 or limpio == "0":
         return ""
-    cuerpo = norm[:-1].lstrip("0") or "0"
-    dv = norm[-1]
+    cuerpo = limpio[:-1].lstrip("0") or "0"
+    dv = limpio[-1]
     rev = cuerpo[::-1]
     partes = [rev[i:i + 3] for i in range(0, len(rev), 3)]
     cuerpo_fmt = ".".join(partes)[::-1]
