@@ -1,18 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Fachada compatible de la base SQL Server local del torniquete.
+"""Fachada compatible de la BD local del torniquete (SQLite).
 
 Las responsabilidades viven en ``basedatos_componentes``. El resto de la
 aplicación continúa importando ``BDLocal`` desde aquí, por lo que la división
-no altera ningún llamador ni el comportamiento offline.
+no altera ningún llamador ni el comportamiento offline. Reemplaza lo que antes
+era SQL Server (BakeliteTorniquete): ya no hay servidor que instalar, driver
+ODBC que configurar ni contraseña de BD local que guardar -- todo vive en el
+mismo archivo que ya usan la cola de marcas y la bitácora.
 """
 
 import config
-from basedatos_componentes.conexion import (
-    ConexionMixin,
-    cadena_conexion,
-    drivers_disponibles,
-    elegir_driver,
-)
+from basedatos_componentes.conexion import ConexionMixin
 from basedatos_componentes.dispositivos import DispositivosMixin
 from basedatos_componentes.incidentes import IncidentesMixin
 from basedatos_componentes.marcas import MarcasMixin
@@ -26,21 +24,19 @@ class BDLocal(
     TerminalMixin,
     DispositivosMixin,
 ):
-    """Acceso unificado a SQL Server; reconecta y no propaga sus caídas."""
+    """Acceso unificado a la BD local en SQLite."""
 
 
 def probar_conexion():
     """Diagnóstico rápido: ``python basedatos.py``."""
     bd = BDLocal()
-    print("Drivers ODBC:", drivers_disponibles() or "ninguno instalado")
-    print("Driver usado:", elegir_driver())
     if not bd.disponible:
         print("SIN CONEXIÓN:", bd.ultimo_error)
         return False
-    print("Conectado a", config.SQL_BASE, "en", config.SQL_SERVIDOR)
+    print("Archivo  :", config.ARCHIVO_SQLITE_LOCAL)
     print("Terminal :", bd.terminal())
-    print("Versión  :", bd.version_activa())
-    print("Resumen  :", bd.resumen())
+    print("Lectoras :", bd.lectoras())
+    print("Relés    :", bd.reles())
     bd.cerrar()
     return True
 

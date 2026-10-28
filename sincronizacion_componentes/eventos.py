@@ -12,7 +12,8 @@ import terminal_auth
 log = logging.getLogger("sincronizador")
 
 class EventosMixin:
-    """Entrega durable de marcas a SQL Server y BakeliteApi."""
+    """Entrega durable de marcas a BakeliteApi, con una copia corta en la BD
+    local (SQLite) para el historial de la pantalla."""
 
     def _subir_local(self, ev):
         """Normalmente la marca ya está en la BD: la creó el controlador al

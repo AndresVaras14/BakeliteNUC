@@ -57,6 +57,138 @@ CREATE INDEX IF NOT EXISTS IX_BitacoraAplicacion_NivelFecha
     ON BitacoraAplicacion (Nivel, FechaHora DESC);
 CREATE INDEX IF NOT EXISTS IX_BitacoraAplicacion_LoggerFecha
     ON BitacoraAplicacion (Logger, FechaHora DESC);
+
+/* ===========================================================================
+   Lo que antes vivía en BakeliteTorniquete (SQL Server local).
+
+   Lo que se sube a Bakelite (marcas, incidentes) sigue en ColaEventos; estas
+   tablas son solo lo que el torniquete necesita para operar sin red y sin
+   nube: qué lectora/relé es cuál, el estado de conexión en vivo, y una
+   ventana corta de las últimas marcas para la pantalla. Nada de esto crece
+   sin límite -- ver la poda de UltimasMarcas en basedatos_componentes/marcas.py.
+   =========================================================================== */
+
+CREATE TABLE IF NOT EXISTS Terminal (
+    IdTerminal INTEGER PRIMARY KEY,
+    Nombre TEXT NOT NULL,
+    Ubicacion TEXT,
+    Activo INTEGER NOT NULL DEFAULT 1,
+    NombreFecha TEXT NOT NULL,
+    NombreOrigen TEXT NOT NULL DEFAULT 'LOCAL' CHECK (NombreOrigen IN ('LOCAL','API')),
+    NombrePor TEXT,
+    NombreSincronizado INTEGER NOT NULL DEFAULT 0,
+    ArduinoConectado INTEGER,
+    ArduinoPuerto TEXT,
+    ArduinoEstadoFecha TEXT
+);
+
+CREATE TABLE IF NOT EXISTS Lectoras (
+    IdTerminal INTEGER NOT NULL,
+    Numero INTEGER NOT NULL,
+    -- Sin CHECK a propósito: dispositivos.py usa 'X' como valor transitorio
+    -- al intercambiar sentidos (ver _set_sentido). La app ya valida 'E'/'S'
+    -- antes de escribir, así que no hace falta duplicarlo aquí.
+    Sentido TEXT NOT NULL,
+    Descripcion TEXT,
+    Activa INTEGER NOT NULL DEFAULT 1,
+    ConfigFecha TEXT NOT NULL,
+    ConfigOrigen TEXT NOT NULL DEFAULT 'LOCAL' CHECK (ConfigOrigen IN ('LOCAL','API')),
+    ConfigPor TEXT,
+    Sincronizado INTEGER NOT NULL DEFAULT 1,
+    Conectada INTEGER,
+    UltimoPuerto TEXT,
+    UltimaLectura TEXT,
+    UltimoError TEXT,
+    EstadoFecha TEXT,
+    Ancla TEXT,
+    PRIMARY KEY (IdTerminal, Numero)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS UX_Lectoras_Sentido
+    ON Lectoras (IdTerminal, Sentido) WHERE Activa = 1;
+
+CREATE TABLE IF NOT EXISTS Reles (
+    IdTerminal INTEGER NOT NULL,
+    Numero INTEGER NOT NULL,
+    -- Sin CHECK por el mismo motivo que en Lectoras (ver arriba).
+    Sentido TEXT NOT NULL,
+    Comando TEXT NOT NULL,
+    Descripcion TEXT,
+    Activo INTEGER NOT NULL DEFAULT 1,
+    ConfigFecha TEXT NOT NULL,
+    ConfigOrigen TEXT NOT NULL DEFAULT 'LOCAL' CHECK (ConfigOrigen IN ('LOCAL','API')),
+    ConfigPor TEXT,
+    Sincronizado INTEGER NOT NULL DEFAULT 1,
+    UltimoDisparo TEXT,
+    UltimoError TEXT,
+    EstadoFecha TEXT,
+    PRIMARY KEY (IdTerminal, Numero)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS UX_Reles_Sentido
+    ON Reles (IdTerminal, Sentido) WHERE Activo = 1;
+
+CREATE TABLE IF NOT EXISTS EstadoServicios (
+    Servicio TEXT PRIMARY KEY CHECK (Servicio IN ('BAKELITE','EXTERNA')),
+    Descripcion TEXT,
+    EnLinea INTEGER NOT NULL DEFAULT 0,
+    UltimaConexionOk TEXT,
+    UltimaFalla TEXT,
+    UltimoError TEXT,
+    FechaActualizacion TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS IncidentesConexion (
+    IdIncidente INTEGER PRIMARY KEY AUTOINCREMENT,
+    IdIncidenteUuid TEXT,
+    IdTerminal INTEGER NOT NULL,
+    Servicio TEXT NOT NULL CHECK (Servicio IN ('BAKELITE','EXTERNA')),
+    FechaDeteccion TEXT NOT NULL,
+    FechaRecuperacion TEXT,
+    IntentosFallidos INTEGER NOT NULL DEFAULT 1,
+    PrimerError TEXT,
+    UltimoError TEXT,
+    EstadoEnvio TEXT NOT NULL DEFAULT 'PENDIENTE'
+        CHECK (EstadoEnvio IN ('PENDIENTE','ENVIADO','FALLIDO','NO_APLICA')),
+    IntentosEnvio INTEGER NOT NULL DEFAULT 0,
+    UltimoIntentoEnvio TEXT,
+    FechaEnvio TEXT,
+    HttpStatusEnvio INTEGER,
+    RespuestaEnvio TEXT,
+    ErrorEnvio TEXT,
+    IdRegistroApi INTEGER,
+    EstadoApi TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS UX_Incidentes_Uuid
+    ON IncidentesConexion (IdTerminal, IdIncidenteUuid) WHERE IdIncidenteUuid IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS UX_Incidentes_Abierto
+    ON IncidentesConexion (Servicio) WHERE FechaRecuperacion IS NULL;
+CREATE INDEX IF NOT EXISTS IX_Incidentes_Pendientes
+    ON IncidentesConexion (IdIncidente)
+    WHERE EstadoEnvio = 'PENDIENTE' AND FechaRecuperacion IS NOT NULL;
+
+/* Ventana corta para la pantalla (historial), no el registro permanente --
+   ese ya es BakeliteApi. Se poda a un tope fijo en cada inserción. */
+CREATE TABLE IF NOT EXISTS UltimasMarcas (
+    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+    IdEvento TEXT,
+    IdTerminal INTEGER,
+    FechaHora TEXT NOT NULL,
+    Rut TEXT,
+    RutFormateado TEXT,
+    Nombre TEXT,
+    Evento TEXT NOT NULL CHECK (Evento IN ('ENTRADA','SALIDA')),
+    Ubicacion TEXT,
+    Habilitado INTEGER,
+    Motivo TEXT,
+    Resultado TEXT,
+    PayloadJson TEXT,
+    EstadoEnvio TEXT NOT NULL DEFAULT 'PENDIENTE'
+        CHECK (EstadoEnvio IN ('NO_APLICA','PENDIENTE','ENVIADA','FALLIDA')),
+    Intentos INTEGER NOT NULL DEFAULT 0,
+    UltimoError TEXT,
+    IdMarcaApi INTEGER,
+    EstadoApi TEXT
+);
+CREATE INDEX IF NOT EXISTS IX_UltimasMarcas_Evento ON UltimasMarcas (IdEvento);
 """
 
 

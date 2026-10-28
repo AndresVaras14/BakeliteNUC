@@ -121,8 +121,7 @@ def main():
     arduino = Arduino()
     store = RegistroStore()
 
-    # BD local (SQL Server / BakeliteTorniquete). Si no está disponible la app
-    # arranca igual: las marcas quedan en SQLite y se guardan al reconectar.
+    # BD local: SQLite (basedatos.py). Ya no depende de un servidor aparte.
     bd_local = BDLocal()
     # La configuración de lectoras y relés vive en la BD; el JSON es respaldo.
     ajustes = Ajustes(bd_local=bd_local)

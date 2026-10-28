@@ -31,9 +31,11 @@ serie, extrae el RUT, valida el acceso y responde al relé y al semáforo.
 - **RUT enmascarado** en pantalla (`4.266.307-7`); localmente se conserva para sincronizar.
 - **Estado en línea** en el pie: luz **verde** (en línea) / **roja** (sin conexión)
   y la **hora de la última conexión** al servidor.
-- **Cola transaccional SQLite** (`bakelite_nuc.db`) con dos banderas por evento:
-  `subido_local` y `subido_api`; se sube a **SQL Server local** y a la **API**, y
-  lo que quede pendiente se reintenta. La misma base guarda la bitácora completa.
+- **Cola transaccional SQLite** (`bakelite_nuc.db`) con bandera `subido_api` por
+  evento: se sube a la **API** y lo que quede pendiente se reintenta. La misma
+  base guarda la bitácora completa, la configuración de lectoras/relés y una
+  ventana corta de las últimas marcas para la pantalla — no hay servidor de
+  base de datos aparte que instalar.
 - **Ubicación del torniquete** configurable (en ⚙ Ajustes), se muestra en el pie.
 - **Pantalla de estado de conexión** (botón 🔌 Estado): muestra si falta
   conectar alguna lectora o el Arduino, con botón **Volver a detectar**. No
@@ -61,8 +63,9 @@ serie, extrae el RUT, valida el acceso y responde al relé y al semáforo.
 | `interfaz.py` | Interfaz gráfica (Tkinter): luz grande, historial, diálogos. |
 | `widgets.py` | Widgets redondeados (píldoras, botones, paneles) con Pillow. |
 | `ajustes.py` | Inversión de lectoras/relés + ubicación, en `ajustes.json`. |
-| `registros.py` | Registro en JSON (con banderas) + BD local SQLite. |
-| `sincronizador.py` | Sube pendientes a BD local + API, reintenta, estado en línea. |
+| `registros.py` | Cola transaccional de eventos en SQLite (`bakelite_nuc.db`). |
+| `basedatos.py` | BD local en SQLite: terminal, lectoras/relés, incidentes, historial corto. |
+| `sincronizador.py` | Sube pendientes a la API, reintenta, estado en línea. |
 | `supervisor.py` | Lanza la app y la relanza si se cae (auto-reinicio). |
 | `personas.json` | Base de datos de pruebas (editable). |
 
@@ -77,8 +80,8 @@ serie, extrae el RUT, valida el acceso y responde al relé y al semáforo.
   ```bash
   python instalar.py --verificar
   ```
-- `requirements.txt` usa marcadores de plataforma: instala `pymssql` como
-  respaldo únicamente en Windows; Linux usa `pyodbc` con ODBC/FreeTDS.
+- La BD local es SQLite, incluida con Python: no hay servidor ni driver que
+  instalar aparte (ver `requirements.txt`).
 - Tkinter (en Linux puede requerir el paquete del sistema):
   ```bash
   sudo apt install python3-tk
@@ -174,12 +177,12 @@ etc.). Todo se guarda en `ajustes.json` y se aplica al instante.
 ## Registros y sincronización
 
 Cada acceso (autorizado o denegado) se guarda en **`bakelite_nuc.db`**, tabla
-`ColaEventos`, con dos banderas:
+`ColaEventos`:
 
 ```text
 { "id": 1, "id_evento": "b5fcccc5…", "rut": "042663077",
   "nombre": "Laura Sofía Gómez", "sentido": "E", "codigo": 1, "autorizado": true,
-  "ubicacion": "Torniquete Norte", "subido_local": 0, "subido_api": 0,
+  "ubicacion": "Torniquete Norte", "subido_api": 0,
   "payload": { "idEvento": "b5fcccc5…", "idTerminal": 1, "resultado": "AUTORIZADO",
                "rut": "4.266.307-7", "evento": "ENTRADA",
                "fechaHora": "2026-08-19T14:35:20-04:00", "nombre": "Laura Sofía Gómez" } }
@@ -188,11 +191,10 @@ Cada acceso (autorizado o denegado) se guarda en **`bakelite_nuc.db`**, tabla
 Además, cada marca lleva un **`idEvento` (UUID)** único y su **payload completo**
 guardado en SQLite *antes* de enviarse (cola local, según el contrato).
 
-El **sincronizador** (hilo en segundo plano) toma los que están en 0 y los sube:
-
-- **BD local** → SQL Server (`BakeliteTorniquete`). Al insertarlo, `subido_local = 1`.
-- **API de Bakelite** → `POST https://bakeliteapi.sopytec.cl/api/terminal/events`
-  con el payload del contrato ([CONTRATO_INTEGRACION_TORNIQUETE.md](CONTRATO_INTEGRACION_TORNIQUETE.md)).
+El **sincronizador** (hilo en segundo plano) toma los que tienen `subido_api = 0`
+y los sube a la **API de Bakelite** →
+`POST https://bakeliteapi.sopytec.cl/api/terminal/events` con el payload del
+contrato ([CONTRATO_INTEGRACION_TORNIQUETE.md](CONTRATO_INTEGRACION_TORNIQUETE.md)).
 
 La tabla `BitacoraAplicacion` recibe los logs y acciones relevantes de todos los
 módulos, con fecha, nivel, origen, hilo, proceso, archivo, función, línea y

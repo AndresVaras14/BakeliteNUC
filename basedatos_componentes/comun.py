@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Utilidades compartidas por los repositorios de la base local."""
+"""Utilidades compartidas por los repositorios de la base local (SQLite)."""
 
 import datetime
+
 
 def _ahora_iso():
     """Fecha/hora local con offset (Chile), como la usa el contrato."""
@@ -9,8 +10,9 @@ def _ahora_iso():
 
 
 def _texto_fecha(valor):
-    """Fecha para un parámetro DATETIMEOFFSET. pyodbc no enlaza ese tipo, así
-    que va como texto ISO y SQL Server lo convierte (igual que los incidentes)."""
+    """Fecha como texto ISO. SQLite no tiene tipo fecha propio: todo se
+    compara como texto, así que el formato tiene que ser SIEMPRE el mismo
+    (mismo padding, mismo offset) o un ORDER BY/rango sale mal sin avisar."""
     if isinstance(valor, datetime.datetime):
         if valor.tzinfo is None:
             valor = valor.astimezone()
@@ -31,3 +33,12 @@ def _evento_largo(evento):
         return evento
     return "SALIDA" if evento == "S" else "ENTRADA"
 
+
+def _bin(valor):
+    """bool/None -> 0/1/None, para escribir en una columna INTEGER."""
+    return None if valor is None else (1 if valor else 0)
+
+
+def _leer_bool(valor):
+    """0/1/None de SQLite -> bool/None."""
+    return None if valor is None else bool(valor)

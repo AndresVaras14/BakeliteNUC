@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Cola SQLite persistente de marcas pendientes de SQL Server y BakeliteApi."""
+"""Cola SQLite persistente de marcas pendientes de subir a BakeliteApi."""
 
 import datetime
 import json

@@ -5,6 +5,10 @@ logs/
 registros.json
 registros.json.tmp
 registros_local.db
+bakelite_nuc.db
+bakelite_nuc.db-wal
+bakelite_nuc.db-shm
+bakelite_nuc.db-journal
 ajustes.json
 credenciales_api_externa.json
 clave_terminal.json

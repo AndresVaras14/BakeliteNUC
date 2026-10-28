@@ -157,42 +157,25 @@ DEBUG_MAX_BYTES = 2_000_000          # al pasarse, se conserva una copia .1
 DEBUG_LINEAS_HISTORIAL = 800         # cuántas se muestran al abrir el panel
 
 # ===== SINCRONIZACIÓN (BD local + API) =====
-# Cada marca (acceso autorizado/rechazado) se guarda en SQLite (cola local) con
-# subido_local=0 y subido_api=0, y el sincronizador la sube a la BD local
-# (SQL Server) y a la API de Bakelite (contrato). Lo que quede en 0 se reintenta con espera
-# incremental. Ver CONTRATO_INTEGRACION_TORNIQUETE.md.
+# Cada marca (acceso autorizado/rechazado) se guarda en SQLite (cola local,
+# ColaEventos) con subido_api=0, y el sincronizador la sube a la API de
+# Bakelite (contrato). Lo que quede en 0 se reintenta con espera incremental.
+# Ver CONTRATO_INTEGRACION_TORNIQUETE.md.
 SINCRONIZAR_INTERVALO_SEGUNDOS = 10
 SINCRONIZAR_ESPERA_MAX_SEGUNDOS = 60   # tope de la espera incremental ante fallos de red
 
-# Cada cuánto se comprueba que las APIs siguen respondiendo, aunque no haya
-# nada que subir. Es independiente de la espera incremental de arriba: aunque
-# los reintentos se separen hasta 60 s, el estado se sigue revisando a este
-# ritmo, así el indicador de la pantalla no se queda pegado.
-# Todo lo periódico contra Bakelite va al mismo ritmo de 10 s: un solo número
-# que recordar, y ningún indicador más viejo que otro.
+# Cada cuánto se comprueba que la API sigue respondiendo, aunque no haya nada
+# que subir. Es independiente de la espera incremental de arriba: aunque los
+# reintentos se separen hasta 60 s, el estado se sigue revisando a este ritmo,
+# así el indicador de la pantalla no se queda pegado.
 PING_INTERVALO_SEGUNDOS = 10
 
-USAR_BD_LOCAL = True        # True = escribe en SQL Server (BakeliteTorniquete)
-SIMULAR_API = False         # False = envía de verdad a la API (contrato)
-
-# ===== BD LOCAL: SQL SERVER (BakeliteTorniquete) =====
-# El esquema lo crea bd/01_crear_BakeliteTorniquete.sql y el dueño de la base
-# lo deja bd/00_crear_usuario.sql. Requiere pyodbc + driver ODBC de Microsoft.
-SQL_SERVIDOR = os.environ.get("BAKELITE_SQL_SERVIDOR", "localhost")
-SQL_BASE = os.environ.get("BAKELITE_SQL_BASE", "BakeliteTorniquete")
-SQL_USUARIO = os.environ.get("BAKELITE_SQL_USUARIO", "userBakelite")
-SQL_CLAVE = os.environ.get("BAKELITE_SQL_CLAVE", "bakelite123")
-SQL_PUERTO = int(os.environ.get("BAKELITE_SQL_PUERTO", "1433"))
-# Driver ODBC instalado. Los dos que sirven:
-#   "ODBC Driver 18 for SQL Server"  -> driver oficial de Microsoft
-#   "FreeTDS"                        -> paquete tdsodbc de Ubuntu
-# Con AUTO se usa el de Microsoft si está, y si no FreeTDS (ver basedatos.py).
-SQL_DRIVER = os.environ.get("BAKELITE_SQL_DRIVER", "AUTO")
-SQL_TRUSTED = False          # True = autenticación de Windows (ignora usuario/clave)
-SQL_ENCRYPT = True           # el Driver 18 cifra por defecto
-SQL_TRUST_CERT = True        # instancia local con certificado autofirmado
-SQL_TIMEOUT_CONEXION = 5     # segundos para abrir la conexión
-SQL_TIMEOUT_CONSULTA = 15    # segundos por consulta
+# BD local: SQLite (ver basedatos.py y almacen_sqlite.py), siempre encendida.
+# Antes podía apuntar a SQL Server y apagarse si no estaba disponible; ya no
+# hace falta ese interruptor -- un archivo local no tiene "no disponible" en
+# el mismo sentido que un servidor de red.
+USAR_BD_LOCAL = True
+SIMULAR_API = False          # False = envía de verdad a la API (contrato)
 
 # Clave que identifica a este terminal ante /api/terminal/* de Bakelite (ver
 # terminal_auth.py). Archivo local, en .gitignore -- nunca en el repositorio.
@@ -201,6 +184,12 @@ ARCHIVO_CLAVE_TERMINAL = ruta("clave_terminal.json")
 # terminal todavía no tiene clave_terminal.json, para autoregistrarse en
 # Bakelite (ver terminal_auth.py). También gitignored.
 ARCHIVO_CLAVE_APROVISIONAMIENTO = ruta("clave_aprovisionamiento.json")
+
+# Nombre de fábrica de este terminal, si identidad_terminal.json no trae uno
+# (ver identidad_terminal.py). Ajustes/BDLocal lo usan solo para la fila que
+# se crea sola la primera vez; después el nombre se gestiona desde la web o
+# desde la pantalla de Ajustes, no desde acá.
+NOMBRE_TERMINAL_DEFECTO = identidad_terminal.NOMBRE or f"Torniquete {identidad_terminal.NUMERO_TORNIQUETE}"
 
 # API oficial de Bakelite (contrato de integración). El valor real viene de
 # identidad_terminal.json (ver identidad_terminal.py) -- este archivo nunca

@@ -48,8 +48,8 @@ vigilancia de puertos · un hilo `AccesoN` por cada validación en curso · la
 interfaz en el hilo principal.
 
 Ninguno espera a otro por red. **El único punto donde se serializan es la BD
-local**, que tiene un lock porque pyodbc no permite compartir una conexión entre
-hilos.
+local**, que tiene un lock porque la conexión SQLite (`check_same_thread=False`)
+no es segura para usarse desde varios hilos a la vez sin uno.
 
 ---
 
@@ -64,8 +64,8 @@ hilos.
    otra en ella. Tope de seguridad de 30 s por si algo se cuelga.
 5. Se marca la lectora como ocupada y **el trámite sale del hilo de la lectora**,
    que sigue leyendo.
-6. **Se abre la marca** en `dbo.Marcas` (antes de preguntar nada: la cédula ya
-   pasó).
+6. **Se abre la marca** en el historial corto local (antes de preguntar nada:
+   la cédula ya pasó).
 7. **Luz azul + "VALIDANDO"** y se consulta al validador, con tope de **7 s**.
 8. **Se aplica el resultado**: relé primero, luz después (0,15 s de diferencia,
    para que la persona vea verde con el paso ya liberado).
@@ -168,45 +168,55 @@ adopta **conservando su fecha**; si el local es más nuevo, se sube. Empate exac
 
 ## 5. La base de datos local
 
-SQL Server, base `BakeliteTorniquete`, vía pyodbc.
+Todo vive en un solo archivo SQLite (`bakelite_nuc.db`, ver `basedatos.py` y
+`almacen_sqlite.py`). No hay servidor aparte que instalar ni que se pueda caer
+de forma independiente del propio proceso.
+
+El criterio de qué vive acá es simple: **lo que el torniquete necesita para
+operar sin red y sin nube.** El historial completo y permanente de accesos es
+Bakelite (la API), no este archivo.
 
 | Tabla | Qué guarda |
 | --- | --- |
-| `Terminales` | Identidad, nombre sincronizado, estado del Arduino |
+| `Terminal` | Identidad, nombre sincronizado, estado del Arduino |
 | `Lectoras` / `Reles` | Configuración (sentido) y estado observado |
-| `Marcas` | Cada acceso, con su estado de envío |
-| `Trabajadores` | Quién es cada RUT, según respondió la API externa |
-| `ConsultasApiExterna` | Qué se preguntó y qué respondió, con duración |
-| `EnviosBakelite` | Cada intento de subir una marca |
-| `IncidentesConexion` | Cortes vistos por el NUC |
 | `EstadoServicios` | Última conexión conocida de cada servicio |
-| `Errores` | **El registro de problemas y hechos relevantes** |
-| `Versiones` | Versión de la aplicación |
+| `IncidentesConexion` | Cortes vistos por el NUC, pendientes de avisarle a Bakelite |
+| `UltimasMarcas` | **Ventana corta** (10 filas, se poda sola) con el resultado de los últimos accesos, solo para precargar la pantalla al abrir la app |
+| `ColaEventos` | Cola de subida a Bakelite: todo lo que falta o ya se mandó, con su payload completo |
+| `BitacoraAplicacion` | Logging estructurado de toda la app (ver §6) |
 
-**Si SQL Server no está disponible, la app sigue funcionando.** Las marcas quedan
-en `bakelite_nuc.db` y se reconstruyen al reconectar.
+No existen tablas separadas para "quién es cada RUT" ni para el detalle de cada
+consulta a la API externa o de cada intento de subida: eso ya está en Bakelite
+(la fuente permanente) y, mientras está en curso, en `ColaEventos` y en la fila
+correspondiente de `UltimasMarcas`. Duplicarlo en una tabla aparte no aportaba
+nada que esas dos no tuvieran ya.
 
 ---
 
 ## 6. Qué se registra y qué no
 
-Hay **cinco destinos** distintos y conviene no confundirlos.
+Hay **cuatro destinos** distintos y conviene no confundirlos.
 
-### 6.1 Los cinco destinos
+### 6.1 Los cuatro destinos
 
 | Destino | Qué recibe | Rota |
 | --- | --- | --- |
 | `logs/app.log` | Todo desde nivel INFO | 1 MB × 4 |
 | `logs/errores.log` | Solo ERROR y CRITICO | 1 MB × 6 |
 | `logs/debugger.log` | El registro paso a paso del modo debugger | 2 MB × 2 |
-| `bakelite_nuc.db` → `BitacoraAplicacion` | Logging y acciones estructuradas de todos los módulos | configurable; 0 = sin borrado |
-| `dbo.Errores` | **Lo que importa que quede en la base** | no rota |
+| `bakelite_nuc.db` → `BitacoraAplicacion` | Logging y acciones estructuradas de todos los módulos, **incluido lo que importa que quede en la base** (ver 6.2) | configurable; 0 = sin borrado |
 
-La consola muestra lo mismo que `app.log`.
+La consola muestra lo mismo que `app.log`. `BitacoraAplicacion` es el único de
+los cuatro que se puede consultar como datos (filtrar por nivel, por módulo,
+por fecha) en vez de leerse como texto plano.
 
-### 6.2 Lo que SÍ queda en `dbo.Errores`
+### 6.2 Lo que SÍ queda en `BitacoraAplicacion`
 
-Esta tabla no es solo de errores: guarda también hechos buenos que importan.
+No es solo de errores: guarda también hechos buenos que importan. Antes vivía
+en una tabla aparte de SQL Server (`dbo.Errores`); hoy es el mismo logging de
+siempre, capturado por `ManejadorBitacoraSQLite` (`bitacora.py`) sin que cada
+módulo tenga que llamar a nada especial.
 
 | Hecho | Nivel | Origen |
 | --- | --- | --- |
@@ -230,7 +240,7 @@ Los cuatro niveles son `INFO`, `WARN`, `ERROR` y `CRITICO`. Cada fila lleva
 `IdTerminal`, origen, mensaje, detalle y fecha; las de dispositivos incluyen el
 **`idCambio`**, que es lo que permite cruzarlas con el registro de la API.
 
-### 6.3 Lo que NO queda en `dbo.Errores` — y por qué
+### 6.3 Lo que NO queda en `BitacoraAplicacion` — y por qué
 
 | No se registra | Motivo |
 | --- | --- |
@@ -238,15 +248,16 @@ Los cuatro niveles son `INFO`, `WARN`, `ERROR` y `CRITICO`. Cada fila lleva
 | **Cada heartbeat** | Lo mismo; la API guarda el estado consolidado |
 | **Cada sincronización de dispositivos sin cambios** | Solo se registran los **cambios** |
 | **Cada comparación del nombre** | No escribe nada en ningún lado |
-| **Los accesos normales** | Van a `dbo.Marcas`, que es su lugar |
-| **Las consultas a la API externa** | Van a `dbo.ConsultasApiExterna`, con su duración |
-| **Cada intento de subir una marca** | Va a `dbo.EnviosBakelite` |
+| **Los accesos normales** | Van a `UltimasMarcas` (ventana corta) y a `ColaEventos` (cola de subida), que son su lugar |
+| **Las consultas a la API externa** | Su resultado queda reflejado en la fila de `UltimasMarcas` de esa marca; no se guarda un detalle aparte |
+| **Cada intento de subir una marca** | El estado de envío se actualiza en esa misma fila de `UltimasMarcas`, no se guarda uno por intento |
 | **Lecturas ignoradas** (cédula apoyada, cooldown) | Ruido: son cientos por acceso |
 | **Fallos de red repetidos** | Se registra el **primero** y luego uno de cada 30 |
 | Un 404 aislado del heartbeat | Hace falta que se repita 3 veces: podría ser la API caída, no un error de configuración |
 
-El criterio es: **a SQL Server va lo operacional consolidado**; SQLite conserva
-el detalle estructurado local y los archivos permiten una revisión rápida.
+El criterio es: **Bakelite (la nube) es el historial permanente**; la BD local
+solo guarda lo que el torniquete necesita para operar sin red (§5) y una
+ventana corta para la pantalla, nunca un historial completo propio.
 
 ### 6.4 El modo debugger
 

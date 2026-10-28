@@ -30,90 +30,50 @@ sí mismo: lo autoritativo es la hora del cambio.
 
 ## 2. Estructura de la tabla
 
-La tabla `dbo.Terminales` debe tener **los mismos campos de sincronización del
-nombre en ambos lados**, aunque sus columnas generales no sean idénticas. La
-estructura del lado del NUC, confirmada en la base local `BakeliteTorniquete`,
-es:
+Los dos lados deben tener **los mismos campos de sincronización del nombre**,
+aunque el motor y las columnas generales no sean idénticos: BakeliteApi los
+guarda en SQL Server (`dbo.Terminales`); el NUC, en SQLite
+(`bakelite_nuc.db`, tabla `Terminal` — ver `basedatos_componentes/terminal.py`
+y `almacen_sqlite.py`). La estructura del lado del NUC es:
 
 ```sql
-CREATE TABLE dbo.Terminales (
-    IdTerminal          INT               NOT NULL
-        CONSTRAINT PK_Terminales PRIMARY KEY,
-    Nombre              NVARCHAR(150)     NOT NULL,
-    Ubicacion           NVARCHAR(200)     NULL,
-    Activo              BIT               NOT NULL
-        CONSTRAINT DF_Terminales_Activo DEFAULT (1),
-    FechaCreacion       DATETIME2(0)      NOT NULL
-        CONSTRAINT DF_Terminales_FCrea DEFAULT (SYSDATETIME()),
-    FechaModificacion   DATETIME2(0)      NULL,
-    ModificadoPor       NVARCHAR(100)     NULL,
+CREATE TABLE Terminal (
+    IdTerminal          INTEGER PRIMARY KEY,
+    Nombre              TEXT    NOT NULL,
+    Ubicacion           TEXT,
+    Activo              INTEGER NOT NULL DEFAULT 1,
 
     /* --- Sincronización del nombre (last write wins) --- */
-    NombreFecha         DATETIMEOFFSET(0) NOT NULL
-        CONSTRAINT DF_Terminales_NombreFecha DEFAULT (SYSDATETIMEOFFSET()),
-    NombreOrigen        VARCHAR(10)       NOT NULL
-        CONSTRAINT DF_Terminales_NombreOrigen DEFAULT ('LOCAL'),
-    NombrePor           NVARCHAR(100)     NULL,
-    NombreSincronizado  BIT               NOT NULL
-        CONSTRAINT DF_Terminales_NombreSync DEFAULT (1),
+    NombreFecha         TEXT    NOT NULL,
+    NombreOrigen        TEXT    NOT NULL DEFAULT 'LOCAL'
+        CHECK (NombreOrigen IN ('LOCAL','API')),
+    NombrePor           TEXT,
+    NombreSincronizado  INTEGER NOT NULL DEFAULT 0,
 
-    CONSTRAINT CK_Terminales_Nombre CHECK (LEN(LTRIM(RTRIM(Nombre))) > 0),
-    CONSTRAINT CK_Terminales_NombreOrigen CHECK (NombreOrigen IN ('LOCAL','API'))
+    ArduinoConectado     INTEGER,
+    ArduinoPuerto        TEXT,
+    ArduinoEstadoFecha   TEXT
 );
 ```
 
-| Columna | Tipo | Significado |
-| --- | --- | --- |
-| `IdTerminal` | `INT` | Mismo identificador en ambos lados. En este equipo es `1`. |
-| `Nombre` | `NVARCHAR(150)` | Nombre visible del terminal. Nunca vacío. |
-| `NombreFecha` | `DATETIMEOFFSET(0)` | Momento exacto en que se cambió **el nombre**. Es el único criterio de desempate. Con zona horaria, precisión de un segundo. |
-| `NombreOrigen` | `VARCHAR(10)` | Dónde se originó el cambio: `LOCAL` (NUC) o `API` (web). Sirve para auditar y para desempatar. |
-| `NombrePor` | `NVARCHAR(100)` | Usuario que hizo el cambio. Informativo. |
-| `NombreSincronizado` | `BIT` | Solo existe en el NUC: `0` = el cambio local todavía no se subió a la API. No se agrega en Bakelite. |
-| `FechaModificacion` / `ModificadoPor` | | Cambios generales de la fila (ubicación, activo). **No** participan en la sincronización del nombre. |
+| Columna | Significado |
+| --- | --- |
+| `IdTerminal` | Mismo identificador en ambos lados — el que quedó asignado en `identidad_terminal.json` del NUC. |
+| `Nombre` | Nombre visible del terminal. Nunca vacío. |
+| `NombreFecha` | Momento exacto en que se cambió **el nombre**, texto ISO 8601 con offset. Es el único criterio de desempate. SQLite no tiene tipo fecha propio, así que el formato debe ser siempre el mismo o la comparación de texto sale mal. |
+| `NombreOrigen` | Dónde se originó el cambio: `LOCAL` (NUC) o `API` (web). Sirve para auditar y para desempatar. |
+| `NombrePor` | Usuario que hizo el cambio. Informativo. |
+| `NombreSincronizado` | Solo existe en el NUC: `0` = el cambio local todavía no se subió a la API. No se agrega en Bakelite. |
 
-`NombreFecha` es deliberadamente distinta de `FechaModificacion`: cambiar la
-ubicación no debe hacer que un nombre viejo gane la comparación.
+La fila del terminal se crea sola, con este nombre y número, la primera vez
+que el NUC la pide — no hace falta ningún script de instalación de base de
+datos.
 
-### 2.1 Migraciones
+### 2.1 Del lado de BakeliteApi
 
-El NUC ya tiene las columnas de sincronización mostradas en la estructura
-anterior. Para una instalación local anterior, puede usar estas sentencias
-idempotentes:
-
-```sql
-IF COL_LENGTH(N'dbo.Terminales', N'NombreFecha') IS NULL
-    ALTER TABLE dbo.Terminales ADD NombreFecha DATETIMEOFFSET(0) NULL;
-GO
-
-IF COL_LENGTH(N'dbo.Terminales', N'NombreOrigen') IS NULL
-    ALTER TABLE dbo.Terminales ADD NombreOrigen VARCHAR(10) NULL;
-GO
-
-IF COL_LENGTH(N'dbo.Terminales', N'NombrePor') IS NULL
-    ALTER TABLE dbo.Terminales ADD NombrePor NVARCHAR(100) NULL;
-GO
-
-IF COL_LENGTH(N'dbo.Terminales', N'NombreSincronizado') IS NULL
-    ALTER TABLE dbo.Terminales ADD NombreSincronizado BIT NULL;
-GO
-
-/* Las filas anteriores heredan la fecha que ya tenían. Si nunca se editaron,
-   se usa la de creación: cualquier cambio posterior será más reciente. */
-UPDATE dbo.Terminales
-   SET NombreFecha        = COALESCE(NombreFecha,
-                                     TODATETIMEOFFSET(COALESCE(FechaModificacion,
-                                                               FechaCreacion),
-                                                      DATEPART(TZOFFSET, SYSDATETIMEOFFSET()))),
-       NombreOrigen       = COALESCE(NombreOrigen, 'LOCAL'),
-       NombreSincronizado = COALESCE(NombreSincronizado, 0)
- WHERE NombreFecha IS NULL OR NombreOrigen IS NULL OR NombreSincronizado IS NULL;
-GO
-```
-
-En BakeliteApi no se debe ejecutar literalmente ese bloque porque la tabla del
-servidor utiliza `CreadoEn` y `ModificadoEn`. El servidor usa la migración
-`012_TerminalNameSynchronization.sql`, que:
+El servidor usa `CreadoEn` y `ModificadoEn` en vez de `FechaCreacion` /
+`FechaModificacion`, y no tiene `NombreSincronizado` (ese campo solo existe en
+el NUC). Usa la migración `012_TerminalNameSynchronization.sql`, que:
 
 - amplía `Nombre` de 100 a 150 caracteres;
 - agrega `NombreFecha`, `NombreOrigen` y `NombrePor`;
@@ -234,14 +194,15 @@ copia parecería siempre más nueva que la de la API y el cambio rebotaría de
 vuelta en la comparación siguiente.
 
 ```sql
-UPDATE dbo.Terminales
-   SET Nombre = @nombre,
-       NombreFecha = @nombreFecha,      -- la que devolvió la API, tal cual
+-- SQLite (ver basedatos_componentes/terminal.py: aplicar_nombre_remoto)
+UPDATE Terminal
+   SET Nombre = ?,
+       NombreFecha = ?,                 -- la que devolvió la API, tal cual
        NombreOrigen = 'API',
-       NombrePor = @nombrePor,
+       NombrePor = ?,
        NombreSincronizado = 1
- WHERE IdTerminal = @idTerminal
-   AND NombreFecha < @nombreFecha;      -- guarda: nunca pisar algo más nuevo
+ WHERE IdTerminal = ?
+   AND NombreFecha < ?;                 -- guarda: nunca pisar algo más nuevo
 ```
 
 Si el terminal no existe → `HTTP 404`, que se trata como error de configuración

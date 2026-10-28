@@ -33,7 +33,13 @@ _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message
 log.addHandler(_h)
 log.addHandler(logging.StreamHandler())
 try:
-    log.addHandler(ManejadorBitacoraSQLite())
+    # En la raíz, no solo en "supervisor": registrar_en_bd() usa
+    # basedatos.BDLocal.registrar_error(), que desde que la BD local es
+    # SQLite pasa por logging.getLogger("bd.*") en vez de insertar en una
+    # tabla propia. Esos loggers solo llegan a la bitácora si el handler
+    # está en la raíz (igual que hace main.py), porque "bd.*" no es
+    # descendiente de "supervisor" en la jerarquía de logging.
+    logging.getLogger().addHandler(ManejadorBitacoraSQLite())
 except Exception as e:  # noqa: BLE001
     log.error("No se pudo activar la bitácora SQLite del supervisor: %s", e)
 

@@ -8,10 +8,12 @@ final del sistema es Linux; esto es solo el entorno de trabajo.
 | | Versión |
 | --- | --- |
 | Python | 3.14.4 |
-| SQL Server | 2025 (17.0.4075.5) |
 | pyserial | 3.5 |
 | Pillow | 12.1.1 |
 | Tk | 8.6 |
+
+La BD local es SQLite (incluida con Python): no hay servidor que instalar ni
+driver que configurar. Ver `SISTEMA_NUC.md`.
 
 ---
 
@@ -43,44 +45,7 @@ python -c "import tkinter; print(tkinter.TkVersion)"
 
 Si el segundo comando falla, reinstala Python con la opción tcl/tk marcada.
 
-### 1.2 SQL Server
-
-**SQL Server Express** o **Developer** desde
-[la página de Microsoft](https://www.microsoft.com/sql-server/sql-server-downloads).
-Developer es gratuito y trae todo; Express alcanza de sobra.
-
-En el instalador, elige **Personalizada → Instalación independiente** y:
-
-- **Tipo de autenticación: modo mixto** (SQL + Windows). Es obligatorio: la app
-  se conecta con usuario y contraseña, no con autenticación de Windows.
-- Define y anota la clave de **sa**: la vas a necesitar para el script.
-
-Después de instalar, **habilita TCP/IP**, que viene apagado:
-
-1. Abre *SQL Server Configuration Manager*.
-2. *Configuración de red de SQL Server* → *Protocolos de <instancia>*.
-3. **TCP/IP** → clic derecho → **Habilitar**.
-4. Doble clic en TCP/IP → pestaña *Direcciones IP* → al final, en **IPAll**,
-   deja `Puerto TCP = 1433` y borra *Puertos dinámicos*.
-5. Reinicia el servicio *SQL Server*.
-
-> Sin este paso la app no conecta aunque el motor esté corriendo, y el error que
-> da no dice nada sobre TCP.
-
-### 1.3 Driver ODBC
-
-**ODBC Driver 18 for SQL Server**, desde
-[aquí](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server).
-
-Verifica que quedó instalado:
-
-```bat
-python -c "import pyodbc; print(pyodbc.drivers())"
-```
-
-Tiene que aparecer `ODBC Driver 18 for SQL Server`. El código lo elige solo.
-
-### 1.4 Paquetes de Python
+### 1.2 Paquetes de Python
 
 Desde la carpeta del proyecto:
 
@@ -88,11 +53,10 @@ Desde la carpeta del proyecto:
 python -m pip install -r requirements.txt
 ```
 
-En Windows instala `pyserial`, `pyodbc`, `Pillow` y el respaldo `pymssql`.
-Este último solo entra en uso automáticamente si ODBC/Schannel no logra abrir
-la conexión local.
+En Windows instala `pyserial` y `Pillow`. `sqlite3` ya viene con Python, no
+hace falta instalar nada más para la BD local.
 
-### 1.5 Drivers de los aparatos
+### 1.3 Drivers de los aparatos
 
 | Aparato | Driver |
 | --- | --- |
@@ -108,7 +72,7 @@ aparezcan los tres: dos lectoras y el Arduino, cada uno con su COM.
 
 | No instales | Por qué |
 | --- | --- |
-| **FreeTDS / unixODBC** | Son el equivalente Linux del driver ODBC. En Windows sobran. |
+| **SQL Server, ODBC o cualquier motor de BD aparte** | La BD local es SQLite, incluida con Python. |
 | **Fuentes DejaVu** | La app ahora busca entre varias familias y usa Segoe UI o Arial si no encuentra DejaVu. |
 | **WSL** | No hace falta: el código corre nativo en Windows. |
 | **Un servidor web** | La app no expone nada; solo hace peticiones salientes. |
@@ -117,30 +81,12 @@ aparezcan los tres: dos lectoras y el Arduino, cada uno con su COM.
 
 ---
 
-## 3. Crear la base de datos
+## 3. La base de datos
 
-Con SQL Server instalado, ejecuta el script **como `sa`**:
-
-```bat
-sqlcmd -S localhost -U sa -P TuClaveDeSa -i bd\crear_bd_completa.sql
-```
-
-O ábrelo en *SQL Server Management Studio*, conéctate como `sa` y ejecútalo.
-
-El script hace todo solo:
-
-1. crea la base `BakeliteTorniquete`;
-2. crea el login y el usuario **`userBakelite`** con clave `bakelite123` y sus
-   permisos de lectura y escritura;
-3. crea las 11 tablas con sus claves, restricciones e índices;
-4. inserta las filas mínimas: el terminal, la versión, los servicios vigilados y
-   las dos lectoras y dos relés.
-
-Es idempotente: puedes correrlo de nuevo sin romper nada.
-
-> **Los permisos son a propósito acotados.** `userBakelite` puede leer y escribir
-> datos pero **no cambiar la estructura**: las migraciones se ejecutan con `sa`.
-> Así un fallo del software no puede alterar el esquema.
+No hay nada que crear a mano: la primera vez que arranca la app, `basedatos.py`
+deja listas las tablas y las filas mínimas (terminal, lectoras, relés, estado
+de servicios) directamente en `bakelite_nuc.db` (SQLite), usando el número de
+torniquete que ya quedó definido en `identidad_terminal.json`.
 
 Comprueba que la app ve la base:
 
@@ -148,35 +94,27 @@ Comprueba que la app ve la base:
 python -c "import basedatos; print(basedatos.BDLocal().terminal())"
 ```
 
-Debe imprimir el diccionario del terminal 1. Si dice que no hay conexión, revisa
-TCP/IP (§1.2) y el driver ODBC (§1.3).
+Debe imprimir el diccionario del terminal.
 
 ---
 
 ## 4. Configuración
 
-Todo vive en `config.py`. Para desarrollo normalmente **no hay que tocar nada**,
-salvo estos casos:
+Todo vive en `config.py` (más `identidad_terminal.json` para el número de
+torniquete y la dirección de la API — ver `SISTEMA_NUC.md`). Para desarrollo
+normalmente **no hay que tocar nada**, salvo:
 
 | Si… | Cambia |
 | --- | --- |
-| SQL Server está en otra máquina o instancia | `SQL_SERVIDOR` (ej. `"localhost\\SQLEXPRESS"`) |
-| Usaste otra clave para `userBakelite` | `SQL_CLAVE`, y la del script |
 | Quieres probar sin tocar la API real | `SIMULAR_API = True` |
-| No tienes SQL Server a mano | `USAR_BD_LOCAL = False` — la app funciona, encolando en `bakelite_nuc.db` |
+| Vas a usar una dirección de API distinta | `direccion_api` en `identidad_terminal.json` |
 
-También se pueden usar variables de entorno, que ganan sobre `config.py`:
-
-```bat
-set BAKELITE_SQL_SERVIDOR=localhost
-set BAKELITE_SQL_CLAVE=bakelite123
-```
-
-> **Cuidado con `ID_TERMINAL`.** Si desarrollas contra la API de producción con
-> `ID_TERMINAL = 1`, tu equipo de pruebas va a pelear con el NUC real por el
-> mismo terminal: ambos mandarán heartbeat y configuración de dispositivos, y el
-> último en escribir gana. Para desarrollar contra la API real, **pide un
-> idTerminal aparte**.
+> **Cuidado con el número de torniquete.** Si desarrollas contra la API de producción
+> con el mismo `numero_torniquete` que un NUC real, tu equipo de pruebas va a pelear
+> con él por el mismo terminal: ambos mandarán heartbeat y configuración de
+> dispositivos, y el último en escribir gana. Para desarrollar contra la API real,
+> **pide un número de torniquete aparte** (lo autoaprovisiona la API al primer
+> arranque, ver `clave_aprovisionamiento.example.json`).
 
 ---
 
@@ -269,26 +207,23 @@ En orden. Si uno falla, no sigas al siguiente.
 :: 1. Python con interfaz gráfica
 python -c "import tkinter; print('tk', tkinter.TkVersion)"
 
-:: 2. Los tres paquetes
-python -c "import serial, sqlite3, pyodbc, PIL; print('paquetes ok')"
+:: 2. Los paquetes
+python -c "import serial, sqlite3, PIL; print('paquetes ok')"
 
-:: 3. El driver ODBC
-python -c "import pyodbc; print(pyodbc.drivers())"
-
-:: 4. La base responde
+:: 3. La base responde (se crea sola la primera vez)
 python -c "import basedatos; print(basedatos.BDLocal().terminal())"
 
-:: 5. Los dispositivos configurados
+:: 4. Los dispositivos configurados
 python -c "import basedatos; bd=basedatos.BDLocal(); print(bd.lectoras()); print(bd.reles())"
 
-:: 6. Qué hardware ve
+:: 5. Qué hardware ve
 python -c "import deteccion_puertos; print(deteccion_puertos.detectar({}))"
 
-:: 7. La app
+:: 6. La app
 python main.py
 ```
 
-El paso 6 debe mostrar los tres aparatos. Si `arduino` sale como `None` pero en
+El paso 5 debe mostrar los tres aparatos. Si `arduino` sale como `None` pero en
 el Administrador de dispositivos aparece, lee §6.3.
 
 ---
@@ -298,10 +233,7 @@ el Administrador de dispositivos aparece, lee §6.3.
 | Síntoma | Causa habitual |
 | --- | --- |
 | `No module named tkinter` | Python instalado sin tcl/tk. Reinstalar marcando esa opción. |
-| `Data source name not found` | Falta el ODBC Driver 18 (§1.3). |
-| `Login failed for user 'userBakelite'` | El modo mixto no está activo, o la clave no coincide con `config.SQL_CLAVE`. |
-| Conecta desde SSMS pero no desde Python | Falta habilitar TCP/IP (§1.2). |
-| `pyodbc.OperationalError` al arrancar | El servicio SQL Server está detenido. |
+| `numero_torniquete cambió...` al arrancar | Alguien editó `identidad_terminal.json` con un número distinto al ya bloqueado. Ver `identidad_terminal.py`. |
 | La app arranca pero "sin conexión a Bakelite" | Normal si no hay internet. El acceso funciona igual y las marcas se encolan. |
 | No aparece ninguna lectora | Falta el driver CH340, o el cable es solo de carga. |
 | El Arduino no se detecta | §6.3 |

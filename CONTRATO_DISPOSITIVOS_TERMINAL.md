@@ -71,11 +71,18 @@ conclusión distinta sobre el mismo par de fechas.
 
 ## 3. Estructura de las tablas
 
-Las dos tablas existen en ambos lados con los mismos campos de configuración.
-En el NUC incluyen además sus campos locales de sincronización y telemetría;
-esos campos no se replican en SQL Server.
+Las dos tablas existen en ambos lados con los mismos campos de configuración
+(`Sentido`, `Descripcion`/`Comando`, `Activa`/`Activo`, `ConfigFecha`,
+`ConfigOrigen`, `ConfigPor`). El NUC los guarda en SQLite, no en SQL Server
+(ver `basedatos_componentes/dispositivos.py` y `almacen_sqlite.py`), pero con
+los mismos nombres y el mismo significado. El esquema ejecutable que sigue
+describe el lado de **BakeliteApi**, que sí es SQL Server; el equivalente del
+NUC está en §3.4.
 
-### 3.1 `dbo.Lectoras`
+En el NUC incluyen además sus campos locales de sincronización y telemetría;
+esos campos no se replican en BakeliteApi.
+
+### 3.1 `dbo.Lectoras` (BakeliteApi)
 
 ```sql
 CREATE TABLE dbo.Lectoras (
@@ -109,7 +116,7 @@ CREATE UNIQUE INDEX UX_Lectoras_Sentido
 GO
 ```
 
-### 3.2 `dbo.Reles`
+### 3.2 `dbo.Reles` (BakeliteApi)
 
 Idéntica, salvo dos columnas propias:
 
@@ -172,13 +179,42 @@ una descripción no debe hacer que un sentido viejo gane la comparación.
 **ISO 8601 con offset explícito** (`2026-08-26T10:15:30-04:00`), nunca sin zona.
 La comparación se hace en UTC.
 
-### 3.4 Migración del NUC
+### 3.4 El lado del NUC (SQLite)
 
-El NUC ya tiene ambas tablas con `Numero` como clave y sin `IdTerminal`. La
-migración debe agregar `IdTerminal` con el valor de `config.ID_TERMINAL`,
-rehacer la clave primaria y agregar las columnas de sincronización y estado. Las
-filas existentes toman `ConfigOrigen = 'LOCAL'` y `ConfigFecha` = su
-`FechaModificacion` o, si es nula, la de creación del terminal.
+```sql
+CREATE TABLE Lectoras (
+    IdTerminal     INTEGER NOT NULL,
+    Numero         INTEGER NOT NULL,
+    Sentido        TEXT    NOT NULL,          -- 'E' / 'S'
+    Descripcion    TEXT,
+    Activa         INTEGER NOT NULL DEFAULT 1,
+    ConfigFecha    TEXT    NOT NULL,
+    ConfigOrigen   TEXT    NOT NULL DEFAULT 'LOCAL',
+    ConfigPor      TEXT,
+    Sincronizado   INTEGER NOT NULL DEFAULT 1,  -- solo en el NUC
+
+    -- Estado observado, solo en el NUC: la API no lo persiste.
+    Conectada      INTEGER,
+    UltimoPuerto   TEXT,
+    UltimaLectura  TEXT,
+    UltimoError    TEXT,
+    EstadoFecha    TEXT,
+    Ancla          TEXT,
+
+    PRIMARY KEY (IdTerminal, Numero)
+);
+CREATE UNIQUE INDEX UX_Lectoras_Sentido ON Lectoras (IdTerminal, Sentido) WHERE Activa = 1;
+```
+
+`Reles` es igual, con `Comando`/`Activo`/`UltimoDisparo` en vez de
+`Activa`/`UltimaLectura`. No tiene `IdCambio` propio: ese identificador lo crea
+y conserva en memoria `SincronizadorDispositivos` (ver `dispositivos.py` del
+NUC) durante la tanda de cambios pendientes, no se persiste por fila.
+
+La fila de `IdTerminal` es siempre la de `identidad_terminal.json` — no hace
+falta ninguna migración de esquema para instalar un terminal nuevo; las tablas
+y las filas de fábrica (lectora 1 = ENTRADA, lectora 2 = SALIDA) se crean solas
+la primera vez que se las pide.
 
 ---
 

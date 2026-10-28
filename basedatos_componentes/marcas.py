@@ -1,51 +1,75 @@
 # -*- coding: utf-8 -*-
+"""Historial corto de marcas para la pantalla (SQLite).
+
+Ya NO es el registro permanente de accesos -- ese es BakeliteApi (la nube), y
+lo que falta subirle vive en ColaEventos (registros.py), que es autosuficiente
+y no depende de esto para nada. UltimasMarcas es solo una ventana corta
+(TOPE_ULTIMAS_MARCAS filas) para que la pantalla tenga algo que mostrar al
+abrir la app y mientras el torniquete está en uso -- se poda sola en cada
+inserción, nunca crece.
+
+Los errores (`registrar_error`) ya no tienen una tabla propia: se escriben con
+el logging normal de Python, que `ManejadorBitacoraSQLite` (bitacora.py) ya
+captura en BitacoraAplicacion con nivel, módulo, mensaje y detalle -- tener
+una segunda tabla de errores habría sido duplicar lo que ya existe.
+"""
+
 import json
 import logging
-from uuid import uuid4
 
 import config
-from .comun import _ahora_iso, _corta, _evento_largo, _texto_fecha
+from .comun import _ahora_iso, _corta, _evento_largo
 
 log = logging.getLogger("basedatos")
 
+# Cuántas marcas se conservan para la pantalla. El historial que se muestra
+# (HIST_MEMORIA en interfaz_componentes/estado_operacion.py) es más chico; se
+# deja margen porque algunas lecturas quedan "sin respuesta" y no se muestran
+# todas igual de seguido.
+TOPE_ULTIMAS_MARCAS = 10
+
+_NIVEL_LOG = {"INFO": logging.INFO, "WARN": logging.WARNING,
+              "ERROR": logging.ERROR, "CRITICO": logging.CRITICAL}
+
+
 class MarcasMixin:
-    """Marcas, consultas externas, envíos, consultas y errores."""
+    """Historial corto de marcas, para la pantalla."""
 
     def registrar_marca(self, rut, evento, fecha_hora, rut_formateado=None,
                         ubicacion=None, id_evento=None):
-        """Guarda la marca apenas se lee la cédula, antes de saber si está
-        habilitada. `evento` es 'ENTRADA'/'SALIDA' (acepta 'E'/'S').
+        """Dentro de UltimasMarcas: abre la fila apenas se lee la cédula, antes
+        de saber si está habilitada -- `registrar_consulta_externa` la
+        completa después. `evento` es 'ENTRADA'/'SALIDA' (acepta 'E'/'S').
 
         Devuelve {'id_marca', 'id_evento'} o None si la BD no está disponible.
         El IdEvento es el UUID del contrato: se crea UNA sola vez aquí y no se
         vuelve a generar en los reintentos.
         """
+        from uuid import uuid4
         id_evento = id_evento or uuid4().hex
 
         def _fn(cur):
-            cur.execute("SELECT IdTrabajador FROM dbo.Trabajadores WHERE Rut = ?", rut)
-            fila = cur.fetchone()
-            id_trabajador = int(fila[0]) if fila else None
-
-            cur.execute("SELECT TOP (1) IdVersion FROM dbo.Versiones WHERE Activo = 1")
-            fila = cur.fetchone()
-            id_version = int(fila[0]) if fila else None
-
             cur.execute(
-                "INSERT INTO dbo.Marcas "
-                "(IdEvento, IdTerminal, IdTrabajador, Rut, RutFormateado, Evento, "
-                " FechaHora, Ubicacion, EstadoEnvio, IdVersion) "
-                "OUTPUT INSERTED.IdMarca "
-                "VALUES (?,?,?,?,?,?,?,?,'PENDIENTE',?)",
-                id_evento, config.ID_TERMINAL, id_trabajador, rut, rut_formateado,
-                _evento_largo(evento), fecha_hora, _corta(ubicacion, 200), id_version)
-            return int(cur.fetchone()[0])
+                "INSERT INTO UltimasMarcas "
+                "(IdEvento, IdTerminal, Rut, RutFormateado, Evento, FechaHora, "
+                " Ubicacion, EstadoEnvio) "
+                "VALUES (?,?,?,?,?,?,?,'PENDIENTE')",
+                (id_evento, config.ID_TERMINAL, rut, rut_formateado,
+                 _evento_largo(evento), str(fecha_hora), _corta(ubicacion, 200)))
+            id_marca = cur.lastrowid
+            self._podar_ultimas_marcas(cur)
+            return id_marca
 
         ok, id_marca = self._ejecutar(_fn, "registrar_marca")
         if not ok:
             return None
-        log.debug("Marca %s creada en BD local (IdMarca=%s)", id_evento, id_marca)
         return {"id_marca": id_marca, "id_evento": id_evento}
+
+    def _podar_ultimas_marcas(self, cur):
+        cur.execute(
+            "DELETE FROM UltimasMarcas WHERE Id NOT IN "
+            "(SELECT Id FROM UltimasMarcas ORDER BY Id DESC LIMIT ?)",
+            (TOPE_ULTIMAS_MARCAS,))
 
     # ================= Paso 2: consulta a la API externa =================
     def registrar_consulta_externa(self, rut_consultado, id_marca=None,
@@ -53,12 +77,11 @@ class MarcasMixin:
                                    rut_respuesta=None, http_status=None,
                                    respuesta_json=None, exito=False,
                                    mensaje_error=None, duracion_ms=None, url=None):
-        """Guarda la pregunta y la respuesta de la API externa, y copia el
-        resultado sobre la marca (Habilitado / Nombre / Motivo / Resultado).
-
-        habilitado: True/1 habilitado · False/0 rechazado · None sin respuesta.
-        Devuelve IdConsulta o None.
-        """
+        """Copia el resultado de la API externa sobre la marca (Habilitado /
+        Nombre / Motivo / Resultado). habilitado: True habilitado · False
+        rechazado · None sin respuesta. Devuelve True si se aplicó."""
+        if id_marca is None:
+            return None
         hab = None if habilitado is None else (1 if habilitado else 0)
         if hab == 1:
             resultado = "AUTORIZADO"
@@ -68,7 +91,7 @@ class MarcasMixin:
             resultado = "SIN_RESPUESTA"
 
         # "Desconocido" es el relleno que usa la app cuando la API externa no
-        # identifica a la persona: no es un nombre y no debe crear trabajador.
+        # identifica a la persona: no es un nombre de verdad.
         nombre = (nombre or "").strip()
         if nombre.lower() == "desconocido" or len(nombre) < 3:
             nombre = None
@@ -76,62 +99,34 @@ class MarcasMixin:
         motivo = _corta((motivo or "").strip() or None, 250)
 
         def _fn(cur):
-            cur.execute(
-                "INSERT INTO dbo.ConsultasApiExterna "
-                "(IdMarca, RutConsultado, Url, HttpStatus, RutRespuesta, Habilitado, "
-                " Nombre, Motivo, RespuestaJson, Exito, MensajeError, DuracionMs) "
-                "OUTPUT INSERTED.IdConsulta VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                id_marca, rut_consultado, _corta(url, 300), http_status,
-                rut_respuesta, hab, nombre, motivo, respuesta_json,
-                1 if exito else 0, _corta(mensaje_error, 1000), duracion_ms)
-            id_consulta = int(cur.fetchone()[0])
-
-            if id_marca is not None:
-                # Sin respuesta de la API externa no hay nada que mandarle a
-                # Bakelite: la marca queda como NO_APLICA y no entra a la cola.
+            if hab is None:
+                # Sin respuesta: la marca no entra a la cola de envío.
                 cur.execute(
-                    "UPDATE dbo.Marcas "
-                    "SET Habilitado = ?, Nombre = COALESCE(?, Nombre), Motivo = ?, "
-                    "    Resultado = ?, FechaConsulta = SYSDATETIME(), "
-                    "    EstadoEnvio = CASE WHEN ? IS NULL THEN 'NO_APLICA' ELSE EstadoEnvio END "
-                    "WHERE IdMarca = ?",
-                    hab, nombre, motivo, resultado, hab, id_marca)
-
-            # El trabajador se conoce cuando la API externa devuelve su nombre.
-            if nombre and rut_consultado:
-                cur.execute("SELECT IdTrabajador FROM dbo.Trabajadores WHERE Rut = ?",
-                            rut_consultado)
-                fila = cur.fetchone()
-                if fila:
-                    id_trabajador = int(fila[0])
-                    cur.execute(
-                        "UPDATE dbo.Trabajadores "
-                        "SET Nombre = ?, Habilitado = ?, FechaUltimaMarca = SYSDATETIME() "
-                        "WHERE IdTrabajador = ?", nombre, hab, id_trabajador)
-                else:
-                    cur.execute(
-                        "INSERT INTO dbo.Trabajadores "
-                        "(Rut, RutFormateado, Nombre, Habilitado, FechaUltimaMarca) "
-                        "OUTPUT INSERTED.IdTrabajador VALUES (?,?,?,?, SYSDATETIME())",
-                        rut_consultado, rut_respuesta, nombre, hab)
-                    id_trabajador = int(cur.fetchone()[0])
-
-                if id_marca is not None:
-                    cur.execute("UPDATE dbo.Marcas SET IdTrabajador = ? WHERE IdMarca = ?",
-                                id_trabajador, id_marca)
-            return id_consulta
+                    "UPDATE UltimasMarcas "
+                    "SET Habilitado = ?, Resultado = ?, EstadoEnvio = 'NO_APLICA' "
+                    "WHERE Id = ?", (hab, resultado, id_marca))
+            else:
+                cur.execute(
+                    "UPDATE UltimasMarcas "
+                    "SET Habilitado = ?, Nombre = COALESCE(?, Nombre), Motivo = ? , "
+                    "    Resultado = ? WHERE Id = ?",
+                    (hab, nombre, motivo, resultado, id_marca))
+            return cur.rowcount > 0
 
         ok, res = self._ejecutar(_fn, "registrar_consulta_externa")
-        return res if ok else None
+        return bool(ok and res)
 
     def guardar_payload(self, id_marca, payload):
-        """Deja escrito el JSON exacto que se enviará a BakeliteApi, antes del
-        primer intento. En los reintentos se relee de aquí, no se reconstruye."""
+        """Deja escrito el JSON exacto que se enviará a BakeliteApi. No hace
+        falta para los reintentos (esos ya leen de ColaEventos), pero queda
+        guardado igual por si hace falta revisar una marca puntual."""
+        if id_marca is None:
+            return False
         cuerpo = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
 
         def _fn(cur):
-            cur.execute("UPDATE dbo.Marcas SET PayloadJson = ? WHERE IdMarca = ?",
-                        cuerpo, id_marca)
+            cur.execute("UPDATE UltimasMarcas SET PayloadJson = ? WHERE Id = ?",
+                        (cuerpo, id_marca))
             return cur.rowcount > 0
 
         ok, res = self._ejecutar(_fn, "guardar_payload")
@@ -142,76 +137,39 @@ class MarcasMixin:
                                  request_json=None, respuesta_json=None,
                                  estado_api=None, id_marca_api=None,
                                  mensaje_error=None, duracion_ms=None, url=None):
-        """Anota el intento contra BakeliteApi y mueve el estado de la marca.
+        """Refleja en UltimasMarcas si el envío a Bakelite salió bien o no, para
+        que la pantalla sepa si una marca sigue pendiente.
 
-        No guarda una fila por intento: mantiene UNA fila por marca en
-        dbo.EnviosBakelite y la va actualizando (primer intento, último,
-        cuántos hubo, último error) hasta que uno sale bien, y ahí deja además
-        los datos del envío exitoso.
-
-        clasificacion: 'OK'         -> ENVIADA (HTTP 201 REGISTRADO / 200 DUPLICADO)
-                       'PERMANENTE' -> FALLIDA (HTTP 400, no se reintenta)
+        clasificacion: 'OK'         -> ENVIADA
+                       'PERMANENTE' -> FALLIDA (no se reintenta)
                        'REINTENTAR' -> sigue PENDIENTE (red, 429, 5xx)
+        Si la fila ya salió del buffer corto (se podó), no hay dónde anotarlo:
+        no es un error, la marca igual se subió bien -- esto es solo para la
+        pantalla, el envío real lo decide ColaEventos.
         """
+        if id_marca is None:
+            return None
         estado = {"OK": "ENVIADA", "PERMANENTE": "FALLIDA"}.get(clasificacion, "PENDIENTE")
-        exito = 1 if clasificacion == "OK" else 0
 
         def _fn(cur):
             cur.execute(
-                "UPDATE dbo.EnviosBakelite "
-                "SET Intentos = Intentos + 1, UltimoIntento = SYSDATETIME(), "
-                "    PrimerIntento = COALESCE(PrimerIntento, SYSDATETIME()), "
-                "    RequestJson = COALESCE(?, RequestJson), Url = COALESCE(?, Url), "
-                "    UltimoHttpStatus = ?, UltimaRespuesta = ?, UltimoError = ?, "
-                "    UltimaDuracionMs = ?, "
-                "    Exito = CASE WHEN ? = 1 THEN 1 ELSE Exito END, "
-                "    FechaExito = CASE WHEN ? = 1 THEN SYSDATETIME() ELSE FechaExito END, "
-                "    HttpStatusExito = CASE WHEN ? = 1 THEN ? ELSE HttpStatusExito END, "
-                "    EstadoApi = COALESCE(?, EstadoApi), "
-                "    IdMarcaApi = COALESCE(?, IdMarcaApi) "
-                "WHERE IdMarca = ?",
-                request_json, _corta(url or config.ENDPOINT_REGISTRAR_EVENTO, 300), http_status,
-                respuesta_json, _corta(mensaje_error, 1000), duracion_ms,
-                exito, exito, exito, http_status, estado_api, id_marca_api, id_marca)
-
-            if cur.rowcount == 0:
-                cur.execute(
-                    "INSERT INTO dbo.EnviosBakelite "
-                    "(IdMarca, Url, RequestJson, Intentos, PrimerIntento, UltimoIntento, "
-                    " UltimoHttpStatus, UltimaRespuesta, UltimoError, UltimaDuracionMs, "
-                    " Exito, FechaExito, HttpStatusExito, EstadoApi, IdMarcaApi) "
-                    "VALUES (?,?,?,1, SYSDATETIME(), SYSDATETIME(), ?,?,?,?,?, "
-                    "        CASE WHEN ? = 1 THEN SYSDATETIME() END, "
-                    "        CASE WHEN ? = 1 THEN ? END, ?, ?)",
-                    id_marca, _corta(url or config.ENDPOINT_REGISTRAR_EVENTO, 300), request_json,
-                    http_status, respuesta_json, _corta(mensaje_error, 1000), duracion_ms,
-                    exito, exito, exito, http_status, estado_api, id_marca_api)
-
-            cur.execute(
-                "UPDATE dbo.Marcas "
-                "SET Intentos = Intentos + 1, UltimoIntento = SYSDATETIME(), EstadoEnvio = ?, "
-                "    FechaEnvio = CASE WHEN ? = 'ENVIADA' THEN SYSDATETIME() ELSE FechaEnvio END, "
-                "    IdMarcaApi = COALESCE(?, IdMarcaApi), "
-                "    EstadoApi = COALESCE(?, EstadoApi), "
-                "    UltimoError = CASE WHEN ? = 'ENVIADA' THEN NULL ELSE ? END "
-                "WHERE IdMarca = ?",
-                estado, estado, id_marca_api, estado_api,
-                estado, _corta(mensaje_error, 500), id_marca)
-
-            cur.execute("SELECT Intentos FROM dbo.EnviosBakelite WHERE IdMarca = ?", id_marca)
+                "UPDATE UltimasMarcas "
+                "SET Intentos = Intentos + 1, EstadoEnvio = ?, "
+                "    IdMarcaApi = COALESCE(?, IdMarcaApi), EstadoApi = COALESCE(?, EstadoApi), "
+                "    UltimoError = ? WHERE Id = ?",
+                (estado, id_marca_api, estado_api,
+                 None if estado == "ENVIADA" else _corta(mensaje_error, 500), id_marca))
+            cur.execute("SELECT Intentos FROM UltimasMarcas WHERE Id = ?", (id_marca,))
             fila = cur.fetchone()
             return int(fila[0]) if fila else None
 
         ok, res = self._ejecutar(_fn, "registrar_envio_bakelite")
         return res if ok else None
-    def recuperar_marca(self, ev):
-        """Rehace en la BD una marca que quedó solo en la cola SQLite porque la BD
-        estaba caída cuando se pasó la cédula. Idempotente por IdEvento.
 
-        Respeta lo que ya pasó: si la marca alcanzó a entregarse a Bakelite
-        mientras la BD no estaba, se reconstruye directamente como ENVIADA, no
-        como pendiente. Devuelve el IdMarca o None.
-        """
+    def recuperar_marca(self, ev):
+        """Rehace en UltimasMarcas un evento que quedó solo en ColaEventos
+        porque la BD local no tenía todavía la fila (arranque en curso, etc).
+        Idempotente por IdEvento. Devuelve el id de la fila o None."""
         id_evento = ev.get("id_evento")
         existente = self.id_marca_por_evento(id_evento)
         if existente is not None:
@@ -229,51 +187,34 @@ class MarcasMixin:
         self.registrar_consulta_externa(
             rut_consultado=ev.get("rut"), id_marca=id_marca,
             habilitado=bool(ev.get("autorizado")), nombre=ev.get("nombre"),
-            motivo=ev.get("motivo"), exito=True,
-            mensaje_error="Reconstruida desde la cola local (BD caída al leer)")
+            motivo=ev.get("motivo"), exito=True)
         if payload:
             self.guardar_payload(id_marca, payload)
 
         estado_api = ev.get("subido_api")
         if estado_api == 1:
-            # Ya se entregó a Bakelite mientras la BD estaba caída: se refleja
-            # el envío para que la marca no quede pendiente para siempre.
             self.registrar_envio_bakelite(
                 id_marca, "OK", http_status=200,
-                request_json=json.dumps(payload, ensure_ascii=False),
-                estado_api="RECONSTRUIDO", id_marca_api=ev.get("idMarca"),
-                mensaje_error=None)
+                estado_api="RECONSTRUIDO", id_marca_api=ev.get("idMarca"))
         elif estado_api == -1:
             self.registrar_envio_bakelite(
                 id_marca, "PERMANENTE",
-                request_json=json.dumps(payload, ensure_ascii=False),
                 mensaje_error=ev.get("api_error") or "Rechazada por la API")
         return id_marca
 
     # ================= Consultas =================
     def marcas_pendientes(self, tope=100):
-        """Marcas que todavía no llegaron a BakeliteApi. Cada una trae su
-        payload textual: se reenvía tal cual, con el mismo IdEvento."""
-        def _fn(cur):
-            cur.execute(
-                "SELECT TOP (?) IdMarca, IdEvento, PayloadJson, Intentos, UltimoError "
-                "FROM dbo.Marcas "
-                "WHERE EstadoEnvio = 'PENDIENTE' AND PayloadJson IS NOT NULL "
-                "ORDER BY IdMarca", tope)
-            return [{"id_marca": r[0], "id_evento": r[1],
-                     "payload": json.loads(r[2]) if r[2] else None,
-                     "payload_json": r[2], "intentos": r[3], "ultimo_error": r[4]}
-                    for r in cur.fetchall()]
-
-        ok, res = self._ejecutar(_fn, "marcas_pendientes")
-        return res if ok else []
+        """Sin uso real: ColaEventos (self.store.pendientes()) es la fuente de
+        lo que falta subir. Se conserva por compatibilidad de la interfaz."""
+        return []
 
     def ultimas_marcas(self, tope=50):
+        """Para precargar la pantalla al abrir la app (ver main.py)."""
         def _fn(cur):
             cur.execute(
-                "SELECT TOP (?) IdMarca, FechaHora, Rut, Nombre, Evento, Habilitado, "
+                "SELECT Id, FechaHora, Rut, Nombre, Evento, Habilitado, "
                 "       Motivo, Resultado, EstadoEnvio "
-                "FROM dbo.Marcas ORDER BY IdMarca DESC", tope)
+                "FROM UltimasMarcas ORDER BY Id DESC LIMIT ?", (tope,))
             return [{"id_marca": r[0], "fecha": r[1], "rut": r[2], "nombre": r[3],
                      "evento": r[4], "habilitado": r[5], "motivo": r[6],
                      "resultado": r[7], "estado_envio": r[8]} for r in cur.fetchall()]
@@ -283,8 +224,8 @@ class MarcasMixin:
 
     def id_marca_por_evento(self, id_evento):
         def _fn(cur):
-            cur.execute("SELECT IdMarca FROM dbo.Marcas WHERE IdTerminal = ? AND IdEvento = ?",
-                        config.ID_TERMINAL, id_evento)
+            cur.execute("SELECT Id FROM UltimasMarcas WHERE IdTerminal = ? AND IdEvento = ?",
+                        (config.ID_TERMINAL, id_evento))
             fila = cur.fetchone()
             return int(fila[0]) if fila else None
 
@@ -292,16 +233,19 @@ class MarcasMixin:
         return res if ok else None
 
     def resumen(self):
+        """Estadística sobre la ventana corta (TOPE_ULTIMAS_MARCAS filas), no
+        un total histórico -- ese vive en Bakelite. Sin uso real en la app;
+        se conserva por compatibilidad."""
         def _fn(cur):
             cur.execute(
                 "SELECT COUNT(*), "
                 "       SUM(CASE WHEN EstadoEnvio = 'PENDIENTE' THEN 1 ELSE 0 END), "
                 "       SUM(CASE WHEN EstadoEnvio = 'ENVIADA'   THEN 1 ELSE 0 END), "
-                "       SUM(CASE WHEN EstadoEnvio = 'FALLIDA'   THEN 1 ELSE 0 END), "
-                "       MAX(FechaEnvio) FROM dbo.Marcas")
+                "       SUM(CASE WHEN EstadoEnvio = 'FALLIDA'   THEN 1 ELSE 0 END) "
+                "FROM UltimasMarcas")
             r = cur.fetchone()
             return {"total": r[0] or 0, "pendientes": r[1] or 0, "enviadas": r[2] or 0,
-                    "fallidas": r[3] or 0, "ultimo_envio": r[4]}
+                    "fallidas": r[3] or 0, "ultimo_envio": None}
 
         ok, res = self._ejecutar(_fn, "resumen")
         return res if ok else {"total": 0, "pendientes": 0, "enviadas": 0,
@@ -309,14 +253,9 @@ class MarcasMixin:
 
     # ================= Errores =================
     def registrar_error(self, origen, mensaje, nivel="ERROR", detalle=None, id_marca=None):
-        def _fn(cur):
-            cur.execute(
-                "INSERT INTO dbo.Errores (IdTerminal, Origen, Nivel, Mensaje, Detalle, IdMarca) "
-                "VALUES (?,?,?,?,?,?)",
-                config.ID_TERMINAL, _corta(origen, 60), nivel,
-                _corta(mensaje, 1000), detalle, id_marca)
-            return True
-
-        ok, _ = self._ejecutar(_fn, "registrar_error")
-        return ok
-
+        """Ya no tiene tabla propia: pasa por el logging normal, que la
+        bitácora (BitacoraAplicacion) ya captura con nivel, módulo y detalle."""
+        logging.getLogger(f"bd.{origen}").log(
+            _NIVEL_LOG.get(nivel, logging.ERROR), "%s%s",
+            mensaje, f" | {detalle}" if detalle else "")
+        return True
